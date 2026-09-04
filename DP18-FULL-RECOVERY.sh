@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # DP18 FULL RECOVERY
-# SCRIPT_VERSION=1.6.0
+# SCRIPT_VERSION=1.7.0
 # Recovery autonomo DD40-00000 -> DP18-xxxxx:
 # - recupera matricola e prodotti dai Pardata storici
 # - converte MH430/Raspberry a DP18 3.12 usando gia' il firmware patchato con la matricola storica
@@ -12,7 +12,7 @@ set -Eeuo pipefail
 # - sopravvive ai reboot Raspberry tramite servizio systemd temporaneo
 # - lascia log e risultato persistenti, poi rimuove il servizio temporaneo.
 
-SCRIPT_VERSION="1.6.0-github"
+SCRIPT_VERSION="1.7.0-github"
 SELF="/root/DP18-FULL-RECOVERY.sh"
 SERVICE="dp18-full-recovery.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE"
@@ -39,6 +39,9 @@ HIST_MODEL_FILE="$STATE/historical_model"
 HIST_SERIAL_FILE="$STATE/historical_serial"
 HIST_SOURCE_FILE="$STATE/historical_source"
 CENSUS_FILE="/root/DD40_RECOVERY_CENSUS.tsv"
+GITHUB_TOKEN_FILE="$STATE/github_token"
+GITHUB_REGISTRY_REPO="MicrohardAssistenza/dp18-recovery"
+GITHUB_REGISTRY_PATH="registry/machines.tsv"
 SECRET_FILE="$STATE/sftp_password"
 
 OFFICIAL312="$PAYLOADS/UsbUpdate_DP18_DUREX.3.12.mha"
@@ -111,7 +114,7 @@ fatal() {
     cp -f "$FAILED_FILE" "/root/DP18_RECOVERY_FAILED.txt" 2>/dev/null || true
   fi
   cleanup_service
-  rm -f "$SECRET_FILE" 2>/dev/null || true
+  rm -f "$SECRET_FILE" "$GITHUB_TOKEN_FILE" 2>/dev/null || true
   echo "ERRORE: $msg" >&2
   if [ "$MODE" = "--resume" ]; then
     # In servizio un errore gestito e' definitivo: exit 0 evita il Restart=on-failure.
@@ -4551,6 +4554,119 @@ if($best!==false) echo $best[1]."\t".$best[2]."\t".$best[3]."\n";
   return 0
 }
 
+github_registry_sync() {
+  local model="$1" serial="$2" status="$3" source="${4:-}"
+  local token api cfg tmp meta current merged body resp sha http try now msg
+
+  [ -s "$GITHUB_TOKEN_FILE" ] || {
+    say "REGISTRO GITHUB: token non disponibile, record conservato solo localmente"
+    return 1
+  }
+
+  token="$(cat "$GITHUB_TOKEN_FILE")"
+  api="https://api.github.com/repos/${GITHUB_REGISTRY_REPO}/contents/${GITHUB_REGISTRY_PATH}"
+  tmp="$STATE/github-registry.$$.tmp"
+  cfg="$tmp.curl"
+  meta="$tmp.meta"
+  current="$tmp.current"
+  merged="$tmp.merged"
+  body="$tmp.body"
+  resp="$tmp.resp"
+  now="$(date -Is 2>/dev/null || date '+%F %T')"
+  source="$(printf '%s' "$source" | tr '\t\r\n' '   ')"
+
+  umask 077
+  {
+    printf 'header = "Authorization: Bearer %s"\n' "$token"
+    printf 'header = "Accept: application/vnd.github+json"\n'
+    printf 'header = "X-GitHub-Api-Version: 2022-11-28"\n'
+  } > "$cfg"
+
+  try=1
+  while [ "$try" -le 8 ]; do
+    http="$(curl -sS --connect-timeout 15 --max-time 45 --config "$cfg" -o "$meta" -w '%{http_code}' "$api?ref=main" 2>/dev/null || true)"
+    if [ "$http" != "200" ]; then
+      say "REGISTRO GITHUB: lettura fallita HTTP ${http:-000}, tentativo $try/8"
+      sleep 3
+      try=$((try+1))
+      continue
+    fi
+
+    sha="$(php -d open_basedir= -r '$j=json_decode(file_get_contents($argv[1]),true); echo isset($j["sha"])?$j["sha"]:"";' "$meta")"
+    [ -n "$sha" ] || {
+      say "REGISTRO GITHUB: SHA non leggibile, tentativo $try/8"
+      sleep 2
+      try=$((try+1))
+      continue
+    }
+
+    php -d open_basedir= -r '$j=json_decode(file_get_contents($argv[1]),true); if(!isset($j["content"])) exit(2); file_put_contents($argv[2],base64_decode(str_replace(array("\r","\n"),"",$j["content"])));' "$meta" "$current" || {
+      say "REGISTRO GITHUB: contenuto TSV non decodificabile"
+      sleep 2
+      try=$((try+1))
+      continue
+    }
+
+    php -d open_basedir= -r '
+$in=$argv[1]; $out=$argv[2]; $now=$argv[3]; $model=$argv[4]; $serial=$argv[5]; $status=$argv[6]; $source=$argv[7];
+$lines=@file($in, FILE_IGNORE_NEW_LINES); if($lines===false) $lines=array();
+$header="detected_at\tmodel\tserial\tstatus\tsource";
+$result=array($header); $done=false;
+foreach($lines as $i=>$line){
+  if($i===0 && strpos($line,"detected_at\tmodel\tserial\tstatus\tsource")===0) continue;
+  if(trim($line)==="") continue;
+  $f=explode("\t",$line,5);
+  if(count($f)<5) continue;
+  if($f[1]===$model && $f[2]===$serial){
+    $old=$f[3];
+    if($old==="RECOVERED" && $status!=="RECOVERED"){
+      $result[]=$line;
+    } elseif($old==="SKIPPED_NON_DP18" && $status!=="RECOVERED"){
+      $result[]=$line;
+    } else {
+      $result[]=implode("\t",array($now,$model,$serial,$status,$source));
+    }
+    $done=true;
+  } else {
+    $result[]=$line;
+  }
+}
+if(!$done) $result[]=implode("\t",array($now,$model,$serial,$status,$source));
+file_put_contents($out,implode("\n",$result)."\n");
+' "$current" "$merged" "$now" "$model" "$serial" "$status" "$source" || {
+      say "REGISTRO GITHUB: merge TSV fallito"
+      sleep 2
+      try=$((try+1))
+      continue
+    }
+
+    msg="Registry ${model}-${serial} ${status}"
+    php -d open_basedir= -r '$content=base64_encode(file_get_contents($argv[1])); echo json_encode(array("message"=>$argv[2],"content"=>$content,"sha"=>$argv[3],"branch"=>"main"));' "$merged" "$msg" "$sha" > "$body"
+
+    http="$(curl -sS --connect-timeout 15 --max-time 45 --config "$cfg" -X PUT -H 'Content-Type: application/json' --data-binary "@$body" -o "$resp" -w '%{http_code}' "$api" 2>/dev/null || true)"
+    case "$http" in
+      200|201)
+        say "REGISTRO GITHUB AGGIORNATO: $model-$serial -> $status"
+        rm -f "$cfg" "$meta" "$current" "$merged" "$body" "$resp"
+        return 0
+        ;;
+      409)
+        say "REGISTRO GITHUB: conflitto concorrente, rileggo e riprovo ($try/8)"
+        sleep 2
+        ;;
+      *)
+        say "REGISTRO GITHUB: scrittura fallita HTTP ${http:-000}, tentativo $try/8"
+        sleep 3
+        ;;
+    esac
+    try=$((try+1))
+  done
+
+  rm -f "$cfg" "$meta" "$current" "$merged" "$body" "$resp"
+  say "ATTENZIONE: registro GitHub non aggiornato dopo 8 tentativi; record locale conservato in $CENSUS_FILE"
+  return 1
+}
+
 record_census() {
   local model="$1" serial="$2" status="$3" source="${4:-}"
   local mac host now
@@ -4570,6 +4686,7 @@ record_census() {
 
   cp -f "$CENSUS_FILE" "$STATE/census.tsv" 2>/dev/null || true
   say "CENSIMENTO: modello=$model matricola=$serial stato=$status"
+  github_registry_sync "$model" "$serial" "$status" "$source" || true
 }
 
 stop_non_dp18() {
@@ -4588,7 +4705,7 @@ stop_non_dp18() {
   echo "Registro locale : $CENSUS_FILE"
   echo "Marker sicurezza: $marker"
   cleanup_service
-  rm -f "$SECRET_FILE" 2>/dev/null || true
+  rm -f "$SECRET_FILE" "$GITHUB_TOKEN_FILE" 2>/dev/null || true
   exit 0
 }
 
@@ -5391,12 +5508,13 @@ finish_success() {
   } > "$DONE_FILE"
 
   cp -f "$DONE_FILE" "/root/DP18_RECOVERY_OK_${pad}.txt"
+  record_census "DP18" "$pad" "RECOVERED" "recovery completato" || true
   printf '%s %s %s recovered=%s disabled=%s\n' \
     "$(date -Is 2>/dev/null || date)" "$pad" "$(hostname)" "$recovered" "$disabled" \
     >> /root/DP18_RECOVERY_HISTORY.log
 
   cleanup_service
-  rm -f "$SECRET_FILE" 2>/dev/null || true
+  rm -f "$SECRET_FILE" "$GITHUB_TOKEN_FILE" 2>/dev/null || true
 
   say "==============================================="
   say "DP18 FULL RECOVERY COMPLETATO"
@@ -5479,7 +5597,7 @@ bootstrap() {
           say "Macchina gia' DP18 con matricola non-zero: $boot_pad"
           say "Nessuno stato recovery persistente: per sicurezza non modifico la macchina"
           cleanup_service
-          rm -f "$SECRET_FILE" 2>/dev/null || true
+          rm -f "$SECRET_FILE" "$GITHUB_TOKEN_FILE" 2>/dev/null || true
           return 0
         fi
 
@@ -5489,7 +5607,7 @@ bootstrap() {
         if [ -f "/root/DP18_RECOVERY_OK_${boot_pad}.txt" ] || [ -e "$DONE_FILE" ]; then
           say "Recovery $boot_pad gia' completata: non eseguo nuovamente flash o configurazione"
           cleanup_service
-          rm -f "$SECRET_FILE" 2>/dev/null || true
+          rm -f "$SECRET_FILE" "$GITHUB_TOKEN_FILE" 2>/dev/null || true
           return 0
         fi
 
@@ -5507,6 +5625,14 @@ bootstrap() {
     chmod 600 "$SECRET_FILE"
   fi
   [ -s "$SECRET_FILE" ] || fatal "DP18_SFTP_PASSWORD non fornita al bootstrap"
+
+  if [ -n "${DP18_GITHUB_TOKEN:-}" ]; then
+    umask 077
+    printf "%s" "$DP18_GITHUB_TOKEN" > "$GITHUB_TOKEN_FILE"
+    chmod 600 "$GITHUB_TOKEN_FILE"
+  fi
+  [ -s "$GITHUB_TOKEN_FILE" ] || fatal "DP18_GITHUB_TOKEN non fornito: necessario per il registro automatico GitHub"
+
   capture_original_info
 
   discover_history
