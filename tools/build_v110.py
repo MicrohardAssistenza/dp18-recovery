@@ -41,7 +41,8 @@ required_defs = [
     'ensure_dp18_software',
     'recover_serial',
     'ensure_final_312',
-    'configure_and_verify',
+    'apply_configuration',
+    'finish_success',
     'resume_main',
     'bootstrap',
 ]
@@ -54,6 +55,8 @@ for needle in [
     'ripristino firmware finale ufficiale DP18 3.12',
     'Firmware finale DP18 3.12 consegnato',
     'funzione interna ensure_final_312 assente',
+    'apply_configuration',
+    'finish_success',
 ]:
     if needle not in s:
         raise SystemExit('missing expected v1.10 marker: ' + needle)
