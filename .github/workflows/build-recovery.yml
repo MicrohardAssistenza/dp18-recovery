@@ -1,0 +1,75 @@
+name: Build DP18 recovery
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-recovery.yml'
+      - 'tools/build_v13.py'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build validated v1.3 recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PIN='81e5e45e7fa1941e60e04403816b39283ec74b6b'
+          OLD_RAW="https://raw.githubusercontent.com/MicrohardAssistenza/mh499-cctalk/${PIN}/dp18-recovery"
+          WORK="$GITHUB_WORKSPACE"
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP" "$WORK/.build-state"' EXIT
+
+          curl -fsSL "$OLD_RAW/install-v1.1.sh" -o "$TMP/install-v1.1.sh"
+          curl -fsSL "$OLD_RAW/hotfix-v1.2.sh" -o "$TMP/hotfix-v1.2.sh"
+
+          # Costruisce la v1.1 completa senza avviare il bootstrap.
+          sed -i \
+            -e "s#^BASE_URL=.*#BASE_URL='${OLD_RAW}/DP18-FULL-RECOVERY-GITHUB.sh'#" \
+            -e "s#^OUT=.*#OUT='${WORK}/DP18-FULL-RECOVERY.sh'#" \
+            -e '/^exec env DP18_SFTP_PASSWORD=.*--bootstrap$/d' \
+            "$TMP/install-v1.1.sh"
+          chmod +x "$TMP/install-v1.1.sh"
+          DP18_SFTP_PASSWORD='build-only-not-a-real-secret' "$TMP/install-v1.1.sh"
+
+          grep -q 'SCRIPT_VERSION="1.1.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
+
+          # Applica la sequenza seriale v1.2 validata sulla DP18-02514,
+          # ma non esegue il bootstrap dentro il runner GitHub.
+          sed -i \
+            -e "s#^TARGET=.*#TARGET='${WORK}/DP18-FULL-RECOVERY.sh'#" \
+            -e "s#^STATE=.*#STATE='${WORK}/.build-state'#" \
+            -e '/exec "\$TARGET" --bootstrap$/d' \
+            "$TMP/hotfix-v1.2.sh"
+          chmod +x "$TMP/hotfix-v1.2.sh"
+          DP18_SFTP_PASSWORD='build-only-not-a-real-secret' "$TMP/hotfix-v1.2.sh"
+
+          grep -q 'SCRIPT_VERSION="1.2.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
+
+          # Aggiunge idempotenza/stato persistente v1.3.
+          python3 "$WORK/tools/build_v13.py" "$WORK/DP18-FULL-RECOVERY.sh"
+
+          bash -n "$WORK/DP18-FULL-RECOVERY.sh"
+          chmod +x "$WORK/DP18-FULL-RECOVERY.sh"
+          "$WORK/DP18-FULL-RECOVERY.sh" --selftest
+          sha256sum "$WORK/DP18-FULL-RECOVERY.sh" | sed 's#  .*/#  #' > "$WORK/manifest.sha256"
+
+      - name: Commit generated recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'DP18 Recovery Builder'
+          git config user.email '136606567+MicrohardAssistenza@users.noreply.github.com'
+          git add DP18-FULL-RECOVERY.sh manifest.sha256
+          if git diff --cached --quiet; then
+            echo 'No generated changes'
+            exit 0
+          fi
+          git commit -m 'Build validated DP18 recovery v1.3.0'
+          git push
