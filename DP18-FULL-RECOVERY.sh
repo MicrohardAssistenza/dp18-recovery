@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # DP18 FULL RECOVERY
-# SCRIPT_VERSION=1.11.0
+# SCRIPT_VERSION=1.12.0
 # Recovery autonomo DD40-00000 -> DP18-xxxxx:
 # - recupera matricola e prodotti dai Pardata storici
 # - converte MH430/Raspberry a DP18 3.12 usando gia' il firmware patchato con la matricola storica
@@ -12,7 +12,7 @@ set -Eeuo pipefail
 # - sopravvive ai reboot Raspberry tramite servizio systemd temporaneo
 # - lascia log e risultato persistenti, poi rimuove il servizio temporaneo.
 
-SCRIPT_VERSION="1.11.0-github"
+SCRIPT_VERSION="1.12.0-github"
 SELF="/root/DP18-FULL-RECOVERY.sh"
 SERVICE="dp18-full-recovery.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE"
@@ -5206,38 +5206,27 @@ wait_marker_gone() {
 }
 
 request_config_backup() {
-  local dest="$1" tag="${2:-backup}"
+  local dest="$1" tag="${2:-backup}" i
   local config="/mhdata/DP18Config.txt"
   local config_needed="/tmp/uploads/config-needed"
   local config_file_ready="/tmp/config-file-ready"
-  local saved="$STATE/config-work/DP18Config.pre-request.${tag}.$$"
-  local i
 
   wait_paypoint 300 || fatal "paypoint.service non attivo per richiesta configurazione"
-  mkdir -p "$STATE/config-work"
 
+  # Protocollo NATIVO gia' validato fisicamente nella recovery v3.5:
+  # NON cancellare DP18Config.txt. config-file-ready e' la prova che la MH430
+  # ha completato la richiesta; il file aggiornato resta /mhdata/DP18Config.txt.
   if [ -e "$config_needed" ]; then
-    wait_marker_gone "$config_needed" 60 || rm -f "$config_needed"
+    wait_marker_gone "$config_needed" 60 || fatal "config-needed precedente non consumato"
   fi
 
-  # FONDAMENTALE: togliamo il file corrente prima della richiesta. In questo modo
-  # il backup accettato non puo' essere il DP18Config.txt che abbiamo scritto noi:
-  # deve essere un file ricreato dalla MH430 dopo config-needed.
   rm -f "$config_file_ready"
-  if [ -f "$config" ]; then
-    cp -a "$config" "$saved"
-    rm -f "$config"
-    sync
-  fi
-
   touch "$config_needed"
   sync
 
   for i in $(seq 1 180); do
-    if [ ! -e "$config_needed" ] && [ -e "$config_file_ready" ] && [ -f "$config" ]; then
-      # Su alcune MH430 CLOSE/config-file-ready precede di qualche secondo il
-      # completamento della scrittura del file. Diamo margine prima di acquisirlo.
-      sleep 6
+    if [ ! -e "$config_needed" ] && [ -e "$config_file_ready" ]; then
+      sleep 2
       sync
       if [ -f "$config" ] \
          && grep -q '^;;BEGIN' "$config" \
@@ -5245,21 +5234,23 @@ request_config_backup() {
          && grep -q '^\[Network\]' "$config" \
          && [ "$(wc -c < "$config" | tr -d ' ')" -ge 200 ]; then
         cp -a "$config" "$dest"
-        rm -f "$config_file_ready" "$saved"
-        say "Backup FRESCO acquisito dalla MH430 ($tag)"
+        rm -f "$config_file_ready"
+        say "Backup configurazione REALE acquisito dalla MH430 ($tag)"
         return 0
       fi
     fi
     sleep 1
   done
 
-  # Se il backup fallisce, non lasciamo /mhdata senza configurazione.
-  if [ ! -f "$config" ] && [ -f "$saved" ]; then
-    cp -a "$saved" "$config"
-    sync
+  echo "Diagnostica timeout backup reale:" >&2
+  echo "  config-needed     : $([ -e "$config_needed" ] && echo PRESENTE || echo CONSUMATO)" >&2
+  echo "  config-file-ready : $([ -e "$config_file_ready" ] && echo PRESENTE || echo ASSENTE)" >&2
+  if [ -f "$config" ]; then
+    echo "  DP18Config.txt    : presente, $(wc -c < "$config" | tr -d ' ') byte" >&2
+  else
+    echo "  DP18Config.txt    : ASSENTE" >&2
   fi
-  rm -f "$config_file_ready"
-  fatal "timeout: nessun DP18Config.txt fresco restituito dalla MH430 ($tag)"
+  fatal "timeout: la MH430 non ha restituito DP18Config.txt dopo config-file-ready ($tag)"
 }
 
 verify_expected_config() {
@@ -5312,10 +5303,10 @@ apply_configuration() {
   sftp_password="$(cat "$SECRET_FILE")"
   [ -n "$sftp_password" ] || fatal "password SFTP recovery vuota"
 
-  # Solo una verifica FRESCA v1.11 puo' far saltare questa fase. I marker creati
-  # dalle versioni precedenti vengono deliberatamente ignorati/rimossi.
-  if [ -e "$CONFIG_DONE" ] && grep -q '^FRESH_MH430_VERIFIED=1$' "$CONFIG_DONE" 2>/dev/null; then
-    say "Configurazione gia' verificata con backup fresco MH430"
+  # Solo la fase config eseguita col protocollo v3.5 validato fisicamente puo'
+  # essere considerata conclusa. Ignoriamo marker delle versioni precedenti.
+  if [ -e "$CONFIG_DONE" ] && grep -q '^PROTOCOL_V35_APPLIED=1$' "$CONFIG_DONE" 2>/dev/null; then
+    say "Configurazione gia' applicata con protocollo v3.5 validato"
     return 0
   fi
   rm -f "$CONFIG_DONE"
@@ -5328,12 +5319,12 @@ apply_configuration() {
   local recoveredcfg="$work/DP18Config.recovered.txt"
   local verifycfg="$work/DP18Config.verify.txt"
   local recovered_ids="$work/recovered.ids"
-  local attempt recovered_count disabled_count tmp
+  local recovered_count disabled_count tmp verified id idx line rid price name ts basis src expected
 
   mkdir -p "$work"
 
-  say "Richiedo alla MH430 un backup FRESCO della configurazione corrente"
-  request_config_backup "$basecfg" "before"
+  say "Richiedo alla MH430 il backup della configurazione corrente (protocollo v3.5)"
+  request_config_backup "$basecfg" "before-v35"
 
   php -d open_basedir= -d date.timezone=UTC -r '
 function set_section_key($s,$section,$key,$value){
@@ -5345,7 +5336,8 @@ function set_section_key($s,$section,$key,$value){
     $block=preg_replace($kp,$key."=".$value,$block,1,$n);
     if($n!==1){fwrite(STDERR,"Impossibile aggiornare chiave: ".$key."\\n");exit(21);}
   } else {
-    $trimmed=rtrim($block,"\r\n"); $block=$trimmed."\n".$key."=".$value."\n\n";
+    $trimmed=rtrim($block,"\r\n");
+    $block=$trimmed."\n".$key."=".$value."\n\n";
   }
   return substr_replace($s,$block,$off,strlen($m[0][0]));
 }
@@ -5355,7 +5347,7 @@ $rows=file($tsv, FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES); $rec=array();
 foreach($rows as $line){
   $p=explode("\t",$line,6); if(count($p)<3) continue;
   $id=intval($p[0]); $price=intval($p[1]); $name=trim($p[2]);
-  if($id<1||$id>18||$price<=0||$name==="") continue;
+  if($id<1 || $id>18 || $price<=0 || $name==="") continue;
   $name=str_replace(array("\r","\n")," ",$name);
   if(strpos($name,"=")!==false){fwrite(STDERR,"Nome prodotto con = non supportato: ".$name."\n");exit(3);}
   $rec[$id]=array("name"=>$name,"price"=>$price);
@@ -5372,10 +5364,18 @@ for($id=1;$id<=18;$id++){
   }
 }
 $network=array(
-  "server-protocol"=>"sftp","server-port"=>"22","server-address"=>"vnd.microhard.it",
-  "server-username"=>"uploads","server-password"=>$sftpPassword,"alarm-email"=>"",
-  "transmission-interval-hours"=>"24","transmission-time-year"=>"26","transmission-time-month"=>"9",
-  "transmission-time-day"=>"5","transmission-time-hh"=>"1","transmission-time-mm"=>"0"
+  "server-protocol"=>"sftp",
+  "server-port"=>"22",
+  "server-address"=>"vnd.microhard.it",
+  "server-username"=>"uploads",
+  "server-password"=>$sftpPassword,
+  "alarm-email"=>"",
+  "transmission-interval-hours"=>"24",
+  "transmission-time-year"=>"26",
+  "transmission-time-month"=>"9",
+  "transmission-time-day"=>"5",
+  "transmission-time-hh"=>"1",
+  "transmission-time-mm"=>"0"
 );
 foreach($network as $k=>$v) $s=set_section_key($s,"Network",$k,$v);
 if(file_put_contents($out,$s)===false) exit(6);
@@ -5388,84 +5388,93 @@ if(file_put_contents($out,$s)===false) exit(6);
   cut -f1 "$PRODUCTS_FILE" > "$recovered_ids"
   recovered_count="$(wc -l < "$recovered_ids" | tr -d ' ')"
   disabled_count=$((18-recovered_count))
-  [ "$recovered_count" -gt 0 ] || fatal "nessun prodotto storico ricostruito: non applico una configurazione vuota"
+  [ "$recovered_count" -gt 0 ] || fatal "nessun prodotto storico ricostruito"
 
-  say "Configurazione DA RIPRISTINARE: $recovered_count canali recuperati, $disabled_count non vendibili"
-  awk -F '\t' '{printf "  CH%02d  %4d  %s\n",$1,$2,$3}' "$PRODUCTS_FILE"
-  echo "  Network -> sftp://vnd.microhard.it:22 user=uploads"
-
-  # Se abbiamo prodotti storici, il file ricostruito deve differire dal backup
-  # attuale almeno nei campi che ci interessano.
-  if cmp -s "$basecfg" "$recoveredcfg"; then
-    fatal "DP18Config ricostruito identico al backup corrente: dati Pardata non applicabili"
-  fi
-
-  for attempt in 1 2 3; do
-    say "APPLICAZIONE CONFIGURAZIONE MH430 - tentativo $attempt/3"
-
-    [ ! -e "$config_ready" ] || { wait_marker_gone "$config_ready" 60 || rm -f "$config_ready"; }
-    [ ! -e "$products_needed" ] || { wait_marker_gone "$products_needed" 60 || rm -f "$products_needed"; }
-
-    # Fase 1: file completo + config-ready. Questo e' il percorso che deve
-    # ripristinare nomi, prezzi e Network.
-    tmp="/mhdata/DP18Config.txt.new.$$"
-    cp "$recoveredcfg" "$tmp"
-    sync
-    mv -f "$tmp" "$config"
-    sync
-    touch "$config_ready"
-    sync
-    wait_marker_gone "$config_ready" 180 || fatal "timeout: config-ready non consumato"
-    say "config-ready consumato; attendo commit configurazione MH430"
-    sleep 12
-
-    # Rilettura FRESCA: il file corrente viene rimosso e deve essere rigenerato
-    # dalla MH430. Verifichiamo prima i dati core senza dipendere dai flag.
-    rm -f "$verifycfg"
-    request_config_backup "$verifycfg" "core-attempt-${attempt}"
-    if verify_expected_config "$verifycfg" 0; then
-      say "Nomi, prezzi e Network realmente presenti nella MH430"
-
-      # Fase 2: product flags. Riscriviamo il file desiderato e notifichiamo
-      # products-needed separatamente, evitando la race dei due marker simultanei.
-      cp "$recoveredcfg" "$tmp"
-      sync
-      mv -f "$tmp" "$config"
-      sync
-      touch "$products_needed"
-      sync
-      wait_marker_gone "$products_needed" 180 || fatal "timeout: products-needed non consumato"
-      sleep 12
-
-      rm -f "$verifycfg"
-      request_config_backup "$verifycfg" "flags-attempt-${attempt}"
-      if verify_expected_config "$verifycfg" 1; then
-        {
-          echo "RECOVERED_COUNT=$recovered_count"
-          echo "DISABLED_COUNT=$disabled_count"
-          echo "FRESH_MH430_VERIFIED=1"
-          echo "VERIFIED_AT=$(date -Is 2>/dev/null || date)"
-        } > "$CONFIG_DONE"
-        say "CONFIGURAZIONE RIPRISTINATA E RILETTA DALLA MH430"
-        return 0
-      fi
-      say "I dati core sono entrati ma i product-flag non coincidono; ritento"
-    else
-      say "La MH430 NON ha mantenuto nomi/prezzi/Network al tentativo $attempt"
-    fi
-
-    cp -a "$verifycfg" "$work/DP18Config.verify.failed.${attempt}.txt" 2>/dev/null || true
-
-    if [ "$attempt" -lt 3 ]; then
-      say "Riavvio controllato MH430 e nuovo tentativo di ripristino configurazione"
-      trigger_empty_mha
-      sleep 45
-      wait_paypoint 300 || fatal "paypoint.service non attivo dopo reboot MH430 durante retry config"
-      sleep 10
+  say "Configurazione ricostruita - protocollo v3.5"
+  echo "Canali recuperati : $recovered_count"
+  echo "Canali non vendibili: $disabled_count"
+  for id in $(seq 1 18); do
+    idx=$((id-1))
+    if grep -qx "$id" "$recovered_ids"; then
+      printf 'Canale %2d RECUPERATO -> ' "$id"
+      grep -E "^product-name_${idx}=" "$recoveredcfg" | head -1
+      printf '                       '
+      grep -E "^product-price-normal_${idx}_0_0=" "$recoveredcfg" | head -1
     fi
   done
 
-  fatal "impossibile ripristinare realmente la configurazione MH430 dopo 3 tentativi"
+  # SEQUENZA IDENTICA ALLA v3.5 VALIDATA FISICAMENTE:
+  # 1) installo il file completo
+  # 2) creo config-ready E products-needed insieme
+  # 3) aspetto che ENTRAMBI vengano consumati
+  # 4) solo dopo richiedo config-needed per rilettura.
+  [ ! -e "$config_ready" ] || fatal "esiste gia' config-ready: richiesta precedente pendente"
+  [ ! -e "$products_needed" ] || fatal "esiste gia' products-needed: richiesta precedente pendente"
+
+  say "Installo DP18Config e segnalo config-ready + products-needed (protocollo v3.5)"
+  tmp="/mhdata/DP18Config.txt.new.$$"
+  cp "$recoveredcfg" "$tmp"
+  sync
+  mv -f "$tmp" "$config"
+  sync
+
+  touch "$config_ready"
+  touch "$products_needed"
+  sync
+
+  wait_marker_gone "$config_ready" 180 || fatal "timeout: la MH430 non ha consumato config-ready"
+  wait_marker_gone "$products_needed" 180 || fatal "timeout: la MH430 non ha consumato products-needed"
+  say "Configurazione e prodotti acquisiti dalla MH430 secondo protocollo v3.5"
+
+  # Diamo piu' margine della v3.5 originale prima della rilettura, senza cambiare
+  # il protocollo di commit.
+  sleep 8
+  say "Rileggo la configurazione dalla MH430 dopo il commit"
+  request_config_backup "$verifycfg" "verify-v35"
+
+  verified=1
+  for id in $(seq 1 18); do
+    idx=$((id-1))
+    if grep -qx "$id" "$recovered_ids"; then
+      line="$(awk -F '\t' -v want="$id" '$1==want{print; exit}' "$PRODUCTS_FILE")"
+      IFS=$'\t' read -r rid price name ts basis src <<< "$line"
+      grep -Fqx "product-name_${idx}=${name}" "$verifycfg" || { echo "Verifica fallita nome canale $id"; verified=0; }
+      grep -Fqx "product-price-normal_${idx}_0_0=${price}" "$verifycfg" || { echo "Verifica fallita prezzo canale $id"; verified=0; }
+      grep -Fqx "product-flag_${idx}=3" "$verifycfg" || { echo "Verifica fallita flag canale $id"; verified=0; }
+    else
+      grep -Fqx "product-name_${idx}=Nome Vuoto!!!" "$verifycfg" || { echo "Verifica fallita nome vuoto canale $id"; verified=0; }
+      grep -Fqx "product-flag_${idx}=0" "$verifycfg" || { echo "Verifica fallita flag non vendibile canale $id"; verified=0; }
+    fi
+  done
+
+  while IFS= read -r expected; do
+    [ -n "$expected" ] || continue
+    grep -Fqx "$expected" "$verifycfg" || { echo "Verifica fallita Network: $expected"; verified=0; }
+  done <<'NETWORK_EXPECTED'
+server-protocol=sftp
+server-port=22
+server-address=vnd.microhard.it
+server-username=uploads
+alarm-email=
+transmission-interval-hours=24
+transmission-time-year=26
+transmission-time-month=9
+transmission-time-day=5
+transmission-time-hh=1
+transmission-time-mm=0
+NETWORK_EXPECTED
+  grep -Fqx "server-password=${sftp_password}" "$verifycfg" || { echo "Verifica fallita Network: server-password"; verified=0; }
+
+  [ "$verified" -eq 1 ] || fatal "protocollo v3.5 eseguito ma configurazione riletta non coincide"
+
+  {
+    echo "RECOVERED_COUNT=$recovered_count"
+    echo "DISABLED_COUNT=$disabled_count"
+    echo "PROTOCOL_V35_APPLIED=1"
+    echo "VERIFIED_AT=$(date -Is 2>/dev/null || date)"
+  } > "$CONFIG_DONE"
+
+  say "CONFIGURAZIONE RIPRISTINATA CON PROTOCOLLO v3.5 VALIDATO"
 }
 
 wait_hostname_target() {
@@ -5629,7 +5638,7 @@ bootstrap() {
 
         if [ -f "/root/DP18_RECOVERY_OK_${boot_pad}.txt" ] || [ -e "$DONE_FILE" ]; then
           if grep -q 'SCRIPT_VERSION=1.11.0-github' "$DONE_FILE" "/root/DP18_RECOVERY_OK_${boot_pad}.txt" 2>/dev/null \
-             && grep -q '^FRESH_MH430_VERIFIED=1$' "$CONFIG_DONE" 2>/dev/null; then
+             && grep -q '^PROTOCOL_V35_APPLIED=1$' "$CONFIG_DONE" 2>/dev/null; then
             say "Recovery $boot_pad gia' completata e configurazione verificata realmente dalla MH430"
             cleanup_service
             rm -f "$SECRET_FILE" "$GITHUB_TOKEN_FILE" 2>/dev/null || true
