@@ -9,6 +9,7 @@ on:
       - 'tools/build_v16.py'
       - 'tools/build_v17.py'
       - 'tools/build_v18.py'
+      - 'tools/build_v19.py'
 
 permissions:
   contents: write
@@ -19,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build validated v1.8 recovery
+      - name: Build validated v1.9 recovery
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -61,12 +62,34 @@ jobs:
           grep -q 'SCRIPT_VERSION="1.7.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'DP18_GITHUB_TOKEN' "$WORK/DP18-FULL-RECOVERY.sh"
 
-          # v1.8: il token macchina puo' solo avviare il workflow GitHub di registro.
           python3 "$WORK/tools/build_v18.py" "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'SCRIPT_VERSION="1.8.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'registry-dispatch.yml' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q '/actions/workflows/' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'REGISTRO GITHUB INVIATO' "$WORK/DP18-FULL-RECOVERY.sh"
+
+          # v1.9: il bootstrap installa systemd prima di analisi Pardata/payload.
+          python3 "$WORK/tools/build_v19.py" "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'SCRIPT_VERSION="1.9.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q "Bootstrap persistente installato PRIMA dell'analisi Pardata" "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'date.timezone=UTC' "$WORK/DP18-FULL-RECOVERY.sh"
+
+          # Verifica strutturale: resume deve contenere la fase lunga, bootstrap no.
+          python3 - "$WORK/DP18-FULL-RECOVERY.sh" <<'PY'
+          from pathlib import Path
+          import sys
+          s=Path(sys.argv[1]).read_text()
+          def fn(name):
+              a=s.index(name+'() {')
+              b=s.index('\n}\n\n',a)
+              return s[a:b]
+          boot=fn('bootstrap')
+          if 'discover_history' in boot or 'extract_payloads' in boot:
+              raise SystemExit('bootstrap still performs long recovery work')
+          if 'systemctl restart "$SERVICE"' not in boot:
+              raise SystemExit('bootstrap does not start persistent service')
+          if 'discover_history' not in s[s.index('say "DP18 FULL RECOVERY v$SCRIPT_VERSION - resume"'):]:
+              raise SystemExit('resume path missing history discovery')
+          PY
 
           bash -n "$WORK/DP18-FULL-RECOVERY.sh"
           chmod +x "$WORK/DP18-FULL-RECOVERY.sh"
@@ -84,5 +107,5 @@ jobs:
             echo 'No generated changes'
             exit 0
           fi
-          git commit -m 'Build validated DP18 recovery v1.8.0'
+          git commit -m 'Build validated DP18 recovery v1.9.0'
           git push
