@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # DP18 FULL RECOVERY
-# SCRIPT_VERSION=1.9.0
+# SCRIPT_VERSION=1.10.0
 # Recovery autonomo DD40-00000 -> DP18-xxxxx:
 # - recupera matricola e prodotti dai Pardata storici
 # - converte MH430/Raspberry a DP18 3.12 usando gia' il firmware patchato con la matricola storica
@@ -12,7 +12,7 @@ set -Eeuo pipefail
 # - sopravvive ai reboot Raspberry tramite servizio systemd temporaneo
 # - lascia log e risultato persistenti, poi rimuove il servizio temporaneo.
 
-SCRIPT_VERSION="1.9.0-github"
+SCRIPT_VERSION="1.10.0-github"
 SELF="/root/DP18-FULL-RECOVERY.sh"
 SERVICE="dp18-full-recovery.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE"
@@ -5476,6 +5476,18 @@ finish_success() {
   say "Servizio temporaneo rimosso: recovery terminato"
 }
 
+ensure_final_312() {
+  if [ -e "$FINAL312_SENT" ]; then
+    say "Firmware finale DP18 3.12 gia' richiesto; non ripeto il flash"
+    wait_paypoint 300 || fatal "paypoint.service non attivo dopo firmware finale"
+    return 0
+  fi
+
+  trigger_update "$OFFICIAL312" "ripristino firmware finale ufficiale DP18 3.12"
+  date +%s > "$FINAL312_SENT"
+  say "Firmware finale DP18 3.12 consegnato. Eventuali reboot Raspberry sono gestiti automaticamente."
+}
+
 resume_main() {
   mkdir -p "$STATE" "$PAYLOADS"
   chmod 700 "$STATE" "$PAYLOADS" 2>/dev/null || true
@@ -5510,6 +5522,7 @@ resume_main() {
   current="$(read_machine_serial || true)"
   [ "$current" = "$num" ] || fatal "seriale non corretto dopo recover_serial"
 
+  declare -F ensure_final_312 >/dev/null || fatal "funzione interna ensure_final_312 assente: recovery interrotto in sicurezza"
   ensure_final_312
 
   # Dopo un eventuale reboot causato dal firmware finale il servizio riparte e
