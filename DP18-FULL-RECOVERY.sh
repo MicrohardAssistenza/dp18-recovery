@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # DP18 FULL RECOVERY
-# SCRIPT_VERSION=1.7.0
+# SCRIPT_VERSION=1.8.0
 # Recovery autonomo DD40-00000 -> DP18-xxxxx:
 # - recupera matricola e prodotti dai Pardata storici
 # - converte MH430/Raspberry a DP18 3.12 usando gia' il firmware patchato con la matricola storica
@@ -12,7 +12,7 @@ set -Eeuo pipefail
 # - sopravvive ai reboot Raspberry tramite servizio systemd temporaneo
 # - lascia log e risultato persistenti, poi rimuove il servizio temporaneo.
 
-SCRIPT_VERSION="1.7.0-github"
+SCRIPT_VERSION="1.8.0-github"
 SELF="/root/DP18-FULL-RECOVERY.sh"
 SERVICE="dp18-full-recovery.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE"
@@ -41,7 +41,7 @@ HIST_SOURCE_FILE="$STATE/historical_source"
 CENSUS_FILE="/root/DD40_RECOVERY_CENSUS.tsv"
 GITHUB_TOKEN_FILE="$STATE/github_token"
 GITHUB_REGISTRY_REPO="MicrohardAssistenza/dp18-recovery"
-GITHUB_REGISTRY_PATH="registry/machines.tsv"
+GITHUB_REGISTRY_WORKFLOW="registry-dispatch.yml"
 SECRET_FILE="$STATE/sftp_password"
 
 OFFICIAL312="$PAYLOADS/UsbUpdate_DP18_DUREX.3.12.mha"
@@ -4556,7 +4556,7 @@ if($best!==false) echo $best[1]."\t".$best[2]."\t".$best[3]."\n";
 
 github_registry_sync() {
   local model="$1" serial="$2" status="$3" source="${4:-}"
-  local token api cfg tmp meta current merged body resp sha http try now msg
+  local token api cfg body resp http try
 
   [ -s "$GITHUB_TOKEN_FILE" ] || {
     say "REGISTRO GITHUB: token non disponibile, record conservato solo localmente"
@@ -4564,15 +4564,10 @@ github_registry_sync() {
   }
 
   token="$(cat "$GITHUB_TOKEN_FILE")"
-  api="https://api.github.com/repos/${GITHUB_REGISTRY_REPO}/contents/${GITHUB_REGISTRY_PATH}"
-  tmp="$STATE/github-registry.$$.tmp"
-  cfg="$tmp.curl"
-  meta="$tmp.meta"
-  current="$tmp.current"
-  merged="$tmp.merged"
-  body="$tmp.body"
-  resp="$tmp.resp"
-  now="$(date -Is 2>/dev/null || date '+%F %T')"
+  api="https://api.github.com/repos/${GITHUB_REGISTRY_REPO}/actions/workflows/${GITHUB_REGISTRY_WORKFLOW}/dispatches"
+  cfg="$STATE/github-dispatch.$$.curl"
+  body="$STATE/github-dispatch.$$.json"
+  resp="$STATE/github-dispatch.$$.resp"
   source="$(printf '%s' "$source" | tr '\t\r\n' '   ')"
 
   umask 077
@@ -4582,88 +4577,43 @@ github_registry_sync() {
     printf 'header = "X-GitHub-Api-Version: 2022-11-28"\n'
   } > "$cfg"
 
+  php -d open_basedir= -r '
+$payload=array(
+  "ref"=>"main",
+  "inputs"=>array(
+    "model"=>$argv[1],
+    "serial"=>$argv[2],
+    "status"=>$argv[3],
+    "source"=>$argv[4]
+  )
+);
+echo json_encode($payload);
+' "$model" "$serial" "$status" "$source" > "$body"
+
   try=1
   while [ "$try" -le 8 ]; do
-    http="$(curl -sS --connect-timeout 15 --max-time 45 --config "$cfg" -o "$meta" -w '%{http_code}' "$api?ref=main" 2>/dev/null || true)"
-    if [ "$http" != "200" ]; then
-      say "REGISTRO GITHUB: lettura fallita HTTP ${http:-000}, tentativo $try/8"
-      sleep 3
-      try=$((try+1))
-      continue
-    fi
-
-    sha="$(php -d open_basedir= -r '$j=json_decode(file_get_contents($argv[1]),true); echo isset($j["sha"])?$j["sha"]:"";' "$meta")"
-    [ -n "$sha" ] || {
-      say "REGISTRO GITHUB: SHA non leggibile, tentativo $try/8"
-      sleep 2
-      try=$((try+1))
-      continue
-    }
-
-    php -d open_basedir= -r '$j=json_decode(file_get_contents($argv[1]),true); if(!isset($j["content"])) exit(2); file_put_contents($argv[2],base64_decode(str_replace(array("\r","\n"),"",$j["content"])));' "$meta" "$current" || {
-      say "REGISTRO GITHUB: contenuto TSV non decodificabile"
-      sleep 2
-      try=$((try+1))
-      continue
-    }
-
-    php -d open_basedir= -r '
-$in=$argv[1]; $out=$argv[2]; $now=$argv[3]; $model=$argv[4]; $serial=$argv[5]; $status=$argv[6]; $source=$argv[7];
-$lines=@file($in, FILE_IGNORE_NEW_LINES); if($lines===false) $lines=array();
-$header="detected_at\tmodel\tserial\tstatus\tsource";
-$result=array($header); $done=false;
-foreach($lines as $i=>$line){
-  if($i===0 && strpos($line,"detected_at\tmodel\tserial\tstatus\tsource")===0) continue;
-  if(trim($line)==="") continue;
-  $f=explode("\t",$line,5);
-  if(count($f)<5) continue;
-  if($f[1]===$model && $f[2]===$serial){
-    $old=$f[3];
-    if($old==="RECOVERED" && $status!=="RECOVERED"){
-      $result[]=$line;
-    } elseif($old==="SKIPPED_NON_DP18" && $status!=="RECOVERED"){
-      $result[]=$line;
-    } else {
-      $result[]=implode("\t",array($now,$model,$serial,$status,$source));
-    }
-    $done=true;
-  } else {
-    $result[]=$line;
-  }
-}
-if(!$done) $result[]=implode("\t",array($now,$model,$serial,$status,$source));
-file_put_contents($out,implode("\n",$result)."\n");
-' "$current" "$merged" "$now" "$model" "$serial" "$status" "$source" || {
-      say "REGISTRO GITHUB: merge TSV fallito"
-      sleep 2
-      try=$((try+1))
-      continue
-    }
-
-    msg="Registry ${model}-${serial} ${status}"
-    php -d open_basedir= -r '$content=base64_encode(file_get_contents($argv[1])); echo json_encode(array("message"=>$argv[2],"content"=>$content,"sha"=>$argv[3],"branch"=>"main"));' "$merged" "$msg" "$sha" > "$body"
-
-    http="$(curl -sS --connect-timeout 15 --max-time 45 --config "$cfg" -X PUT -H 'Content-Type: application/json' --data-binary "@$body" -o "$resp" -w '%{http_code}' "$api" 2>/dev/null || true)"
+    http="$(curl -sS --connect-timeout 15 --max-time 45 --config "$cfg" -X POST -H 'Content-Type: application/json' --data-binary "@$body" -o "$resp" -w '%{http_code}' "$api" 2>/dev/null || true)"
     case "$http" in
-      200|201)
-        say "REGISTRO GITHUB AGGIORNATO: $model-$serial -> $status"
-        rm -f "$cfg" "$meta" "$current" "$merged" "$body" "$resp"
+      200|201|204)
+        say "REGISTRO GITHUB INVIATO: $model-$serial -> $status"
+        rm -f "$cfg" "$body" "$resp"
         return 0
         ;;
-      409)
-        say "REGISTRO GITHUB: conflitto concorrente, rileggo e riprovo ($try/8)"
-        sleep 2
+      401|403)
+        say "REGISTRO GITHUB: token senza permesso Actions:write o non valido (HTTP $http)"
+        rm -f "$cfg" "$body" "$resp"
+        return 1
         ;;
       *)
-        say "REGISTRO GITHUB: scrittura fallita HTTP ${http:-000}, tentativo $try/8"
+        say "REGISTRO GITHUB: dispatch fallito HTTP ${http:-000}, tentativo $try/8"
         sleep 3
         ;;
     esac
     try=$((try+1))
   done
 
-  rm -f "$cfg" "$meta" "$current" "$merged" "$body" "$resp"
-  say "ATTENZIONE: registro GitHub non aggiornato dopo 8 tentativi; record locale conservato in $CENSUS_FILE"
+  rm -f "$cfg" "$body" "$resp"
+  say "ATTENZIONE: evento registro GitHub non inviato dopo 8 tentativi; record locale conservato in $CENSUS_FILE"
   return 1
 }
 
