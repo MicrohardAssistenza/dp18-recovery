@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # DP18 FULL RECOVERY
-# SCRIPT_VERSION=1.12.0
+# SCRIPT_VERSION=1.13.0
 # Recovery autonomo DD40-00000 -> DP18-xxxxx:
 # - recupera matricola e prodotti dai Pardata storici
 # - converte MH430/Raspberry a DP18 3.12 usando gia' il firmware patchato con la matricola storica
@@ -12,7 +12,7 @@ set -Eeuo pipefail
 # - sopravvive ai reboot Raspberry tramite servizio systemd temporaneo
 # - lascia log e risultato persistenti, poi rimuove il servizio temporaneo.
 
-SCRIPT_VERSION="1.12.0-github"
+SCRIPT_VERSION="1.13.0-github"
 SELF="/root/DP18-FULL-RECOVERY.sh"
 SERVICE="dp18-full-recovery.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE"
@@ -42,6 +42,7 @@ CENSUS_FILE="/root/DD40_RECOVERY_CENSUS.tsv"
 GITHUB_TOKEN_FILE="$STATE/github_token"
 GITHUB_REGISTRY_REPO="MicrohardAssistenza/dp18-recovery"
 GITHUB_REGISTRY_WORKFLOW="registry-dispatch.yml"
+GITHUB_REGISTRY_LAST="$STATE/github_registry.last"
 SECRET_FILE="$STATE/sftp_password"
 
 OFFICIAL312="$PAYLOADS/UsbUpdate_DP18_DUREX.3.12.mha"
@@ -4636,7 +4637,17 @@ record_census() {
 
   cp -f "$CENSUS_FILE" "$STATE/census.tsv" 2>/dev/null || true
   say "CENSIMENTO: modello=$model matricola=$serial stato=$status"
-  github_registry_sync "$model" "$serial" "$status" "$source" || true
+
+  local registry_key last_key
+  registry_key="${model}|${serial}|${status}"
+  last_key=""
+  [ -r "$GITHUB_REGISTRY_LAST" ] && last_key="$(cat "$GITHUB_REGISTRY_LAST" 2>/dev/null || true)"
+  if [ "$last_key" = "$registry_key" ]; then
+    say "REGISTRO GITHUB: stato $status gia' inviato per $model-$serial; non duplico il workflow"
+  elif github_registry_sync "$model" "$serial" "$status" "$source"; then
+    printf '%s' "$registry_key" > "$GITHUB_REGISTRY_LAST"
+    chmod 600 "$GITHUB_REGISTRY_LAST" 2>/dev/null || true
+  fi
 }
 
 stop_non_dp18() {
@@ -5305,8 +5316,8 @@ apply_configuration() {
 
   # Solo la fase config eseguita col protocollo v3.5 validato fisicamente puo'
   # essere considerata conclusa. Ignoriamo marker delle versioni precedenti.
-  if [ -e "$CONFIG_DONE" ] && grep -q '^PROTOCOL_V35_APPLIED=1$' "$CONFIG_DONE" 2>/dev/null; then
-    say "Configurazione gia' applicata con protocollo v3.5 validato"
+  if [ -e "$CONFIG_DONE" ] && grep -q '^TOUCH_CONFIG_READY_APPLIED=1$' "$CONFIG_DONE" 2>/dev/null; then
+    say "Configurazione gia' applicata tramite config-ready TOUCH"
     return 0
   fi
   rm -f "$CONFIG_DONE"
@@ -5314,7 +5325,6 @@ apply_configuration() {
   local work="$STATE/config-work"
   local config="/mhdata/DP18Config.txt"
   local config_ready="/tmp/uploads/config-ready"
-  local products_needed="/tmp/uploads/products-needed"
   local basecfg="$work/DP18Config.before.txt"
   local recoveredcfg="$work/DP18Config.recovered.txt"
   local verifycfg="$work/DP18Config.verify.txt"
@@ -5323,8 +5333,8 @@ apply_configuration() {
 
   mkdir -p "$work"
 
-  say "Richiedo alla MH430 il backup della configurazione corrente (protocollo v3.5)"
-  request_config_backup "$basecfg" "before-v35"
+  say "Richiedo il DP18Config corrente prima del ripristino TOUCH"
+  request_config_backup "$basecfg" "before-touch"
 
   php -d open_basedir= -d date.timezone=UTC -r '
 function set_section_key($s,$section,$key,$value){
@@ -5390,7 +5400,7 @@ if(file_put_contents($out,$s)===false) exit(6);
   disabled_count=$((18-recovered_count))
   [ "$recovered_count" -gt 0 ] || fatal "nessun prodotto storico ricostruito"
 
-  say "Configurazione ricostruita - protocollo v3.5"
+  say "Configurazione ricostruita per TOUCH"
   echo "Canali recuperati : $recovered_count"
   echo "Canali non vendibili: $disabled_count"
   for id in $(seq 1 18); do
@@ -5403,15 +5413,13 @@ if(file_put_contents($out,$s)===false) exit(6);
     fi
   done
 
-  # SEQUENZA IDENTICA ALLA v3.5 VALIDATA FISICAMENTE:
-  # 1) installo il file completo
-  # 2) creo config-ready E products-needed insieme
-  # 3) aspetto che ENTRAMBI vengano consumati
-  # 4) solo dopo richiedo config-needed per rilettura.
-  [ ! -e "$config_ready" ] || fatal "esiste gia' config-ready: richiesta precedente pendente"
-  [ ! -e "$products_needed" ] || fatal "esiste gia' products-needed: richiesta precedente pendente"
+  # Protocollo TOUCH / WebFrontend: il file completo e' gia' pronto in /mhdata.
+  # L'unico trigger necessario e' /tmp/uploads/config-ready.
+  if [ -e "$config_ready" ]; then
+    wait_marker_gone "$config_ready" 60 || fatal "config-ready precedente non consumato"
+  fi
 
-  say "Installo DP18Config e segnalo config-ready + products-needed (protocollo v3.5)"
+  say "Installo DP18Config completo in /mhdata e segnalo SOLO config-ready (TOUCH)"
   tmp="/mhdata/DP18Config.txt.new.$$"
   cp "$recoveredcfg" "$tmp"
   sync
@@ -5419,16 +5427,14 @@ if(file_put_contents($out,$s)===false) exit(6);
   sync
 
   touch "$config_ready"
-  touch "$products_needed"
   sync
 
-  wait_marker_gone "$config_ready" 180 || fatal "timeout: la MH430 non ha consumato config-ready"
-  wait_marker_gone "$products_needed" 180 || fatal "timeout: la MH430 non ha consumato products-needed"
-  say "Configurazione e prodotti acquisiti dalla MH430 secondo protocollo v3.5"
+  wait_marker_gone "$config_ready" 180 || fatal "timeout: la TOUCH non ha consumato config-ready"
+  say "config-ready consumato: configurazione completa consegnata alla TOUCH"
 
   sleep 8
   say "Rileggo la configurazione dalla MH430 dopo il commit"
-  request_config_backup "$verifycfg" "verify-v35"
+  request_config_backup "$verifycfg" "verify-touch"
 
   verified=1
   for id in $(seq 1 18); do
@@ -5463,16 +5469,16 @@ transmission-time-mm=0
 NETWORK_EXPECTED
   grep -Fqx "server-password=${sftp_password}" "$verifycfg" || { echo "Verifica fallita Network: server-password"; verified=0; }
 
-  [ "$verified" -eq 1 ] || fatal "protocollo v3.5 eseguito ma configurazione riletta non coincide"
+  [ "$verified" -eq 1 ] || fatal "config-ready TOUCH consumato ma configurazione riletta non coincide"
 
   {
     echo "RECOVERED_COUNT=$recovered_count"
     echo "DISABLED_COUNT=$disabled_count"
-    echo "PROTOCOL_V35_APPLIED=1"
+    echo "TOUCH_CONFIG_READY_APPLIED=1"
     echo "VERIFIED_AT=$(date -Is 2>/dev/null || date)"
   } > "$CONFIG_DONE"
 
-  say "CONFIGURAZIONE RIPRISTINATA CON PROTOCOLLO v3.5 VALIDATO"
+  say "CONFIGURAZIONE RIPRISTINATA VIA CONFIG-READY TOUCH"
 }
 
 wait_hostname_target() {
@@ -5635,8 +5641,8 @@ bootstrap() {
           || fatal "DP18 gia' matricolata $boot_pad ma stato persistente indica $saved_pad: non procedo"
 
         if [ -f "/root/DP18_RECOVERY_OK_${boot_pad}.txt" ] || [ -e "$DONE_FILE" ]; then
-          if grep -q 'SCRIPT_VERSION=1.12.0-github' "$DONE_FILE" "/root/DP18_RECOVERY_OK_${boot_pad}.txt" 2>/dev/null \
-             && grep -q '^PROTOCOL_V35_APPLIED=1$' "$CONFIG_DONE" 2>/dev/null; then
+          if grep -q 'SCRIPT_VERSION=1.13.0-github' "$DONE_FILE" "/root/DP18_RECOVERY_OK_${boot_pad}.txt" 2>/dev/null \
+             && grep -q '^TOUCH_CONFIG_READY_APPLIED=1$' "$CONFIG_DONE" 2>/dev/null; then
             say "Recovery $boot_pad gia' completata e configurazione verificata realmente dalla MH430"
             cleanup_service
             rm -f "$SECRET_FILE" "$GITHUB_TOKEN_FILE" 2>/dev/null || true
