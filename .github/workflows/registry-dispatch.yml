@@ -24,8 +24,11 @@ on:
 permissions:
   contents: write
 
+# Ogni macchina ha la propria coda. In questo modo un recovery nuovo non resta
+# dietro a centinaia di eventi di altre macchine; per la stessa matricola gli
+# aggiornamenti restano serializzati.
 concurrency:
-  group: dp18-machine-registry
+  group: dp18-machine-registry-${{ inputs.model }}-${{ inputs.serial }}
   cancel-in-progress: false
 
 jobs:
