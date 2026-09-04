@@ -5426,8 +5426,6 @@ if(file_put_contents($out,$s)===false) exit(6);
   wait_marker_gone "$products_needed" 180 || fatal "timeout: la MH430 non ha consumato products-needed"
   say "Configurazione e prodotti acquisiti dalla MH430 secondo protocollo v3.5"
 
-  # Diamo piu' margine della v3.5 originale prima della rilettura, senza cambiare
-  # il protocollo di commit.
   sleep 8
   say "Rileggo la configurazione dalla MH430 dopo il commit"
   request_config_backup "$verifycfg" "verify-v35"
@@ -5637,7 +5635,7 @@ bootstrap() {
           || fatal "DP18 gia' matricolata $boot_pad ma stato persistente indica $saved_pad: non procedo"
 
         if [ -f "/root/DP18_RECOVERY_OK_${boot_pad}.txt" ] || [ -e "$DONE_FILE" ]; then
-          if grep -q 'SCRIPT_VERSION=1.11.0-github' "$DONE_FILE" "/root/DP18_RECOVERY_OK_${boot_pad}.txt" 2>/dev/null \
+          if grep -q 'SCRIPT_VERSION=1.12.0-github' "$DONE_FILE" "/root/DP18_RECOVERY_OK_${boot_pad}.txt" 2>/dev/null \
              && grep -q '^PROTOCOL_V35_APPLIED=1$' "$CONFIG_DONE" 2>/dev/null; then
             say "Recovery $boot_pad gia' completata e configurazione verificata realmente dalla MH430"
             cleanup_service
