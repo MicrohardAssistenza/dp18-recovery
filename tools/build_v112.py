@@ -4,6 +4,7 @@ import sys
 p=Path(sys.argv[1]); s=p.read_text()
 s=s.replace('# SCRIPT_VERSION=1.11.0','# SCRIPT_VERSION=1.12.0',1)
 s=s.replace('SCRIPT_VERSION="1.11.0-github"','SCRIPT_VERSION="1.12.0-github"',1)
+s=s.replace('SCRIPT_VERSION=1.11.0-github','SCRIPT_VERSION=1.12.0-github')
 
 def replace_between(text,start_marker,next_marker,new_text):
     a=text.find(start_marker)
@@ -190,8 +191,6 @@ if(file_put_contents($out,$s)===false) exit(6);
   wait_marker_gone "$products_needed" 180 || fatal "timeout: la MH430 non ha consumato products-needed"
   say "Configurazione e prodotti acquisiti dalla MH430 secondo protocollo v3.5"
 
-  # Diamo piu' margine della v3.5 originale prima della rilettura, senza cambiare
-  # il protocollo di commit.
   sleep 8
   say "Rileggo la configurazione dalla MH430 dopo il commit"
   request_config_backup "$verifycfg" "verify-v35"
@@ -242,7 +241,6 @@ NETWORK_EXPECTED
 }'''
 s=replace_between(s,'apply_configuration() {','wait_hostname_target() {',apply)
 
-# Old successful markers must not skip the v3.5 application.
 s=s.replace('FRESH_MH430_VERIFIED=1','PROTOCOL_V35_APPLIED=1')
 
 for needle in [
