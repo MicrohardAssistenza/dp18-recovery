@@ -20,7 +20,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: dp18-repo-writes
+  group: dp18-recovery-builder
   cancel-in-progress: false
 
 jobs:
@@ -122,28 +122,62 @@ jobs:
           "$WORK/DP18-FULL-RECOVERY.sh" --selftest
           sha256sum "$WORK/DP18-FULL-RECOVERY.sh" | sed 's#  .*/#  #' > "$WORK/manifest.sha256"
 
-      - name: Commit generated recovery
+      - name: Publish generated recovery with Contents API
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          git config user.name 'DP18 Recovery Builder'
-          git config user.email '136606567+MicrohardAssistenza@users.noreply.github.com'
-          git add DP18-FULL-RECOVERY.sh manifest.sha256
-          if git diff --cached --quiet; then
-            echo 'No generated changes'
-            exit 0
-          fi
-          git commit -m 'Build validated DP18 recovery v1.13.0'
 
-          for TRY in 1 2 3 4 5; do
-            if git push origin HEAD:main; then
-              exit 0
-            fi
-            echo "Concurrent repository update, rebase/retry ${TRY}/5"
-            git fetch origin main
-            git rebase origin/main
-            sleep $((TRY * 2))
-          done
+          publish_file() {
+            local repo_path="$1" local_file="$2" message="$3" try sha body http
+            body="$(mktemp)"
+            trap 'rm -f "$body"' RETURN
 
-          echo 'Unable to push generated recovery after retries' >&2
-          exit 1
+            for try in 1 2 3 4 5 6 7 8; do
+              sha="$(curl -fsS \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${repo_path}?ref=main" \
+                | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')"
+
+              python3 - "$local_file" "$message" "$sha" > "$body" <<'PY'
+          import base64, json, sys
+          path, message, sha = sys.argv[1:]
+          with open(path, 'rb') as f:
+              content = base64.b64encode(f.read()).decode('ascii')
+          print(json.dumps({'message': message, 'content': content, 'sha': sha, 'branch': 'main'}))
+          PY
+
+              http="$(curl -sS -o /tmp/publish-response.json -w '%{http_code}' \
+                -X PUT \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                -H 'Content-Type: application/json' \
+                --data-binary "@$body" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${repo_path}")"
+
+              case "$http" in
+                200|201)
+                  echo "Published $repo_path"
+                  return 0
+                  ;;
+                409|422)
+                  echo "Concurrent update while publishing $repo_path, retry ${try}/8"
+                  sleep "$try"
+                  ;;
+                *)
+                  cat /tmp/publish-response.json >&2 || true
+                  echo "Publish $repo_path failed HTTP $http" >&2
+                  return 1
+                  ;;
+              esac
+            done
+            echo "Unable to publish $repo_path after retries" >&2
+            return 1
+          }
+
+          publish_file 'DP18-FULL-RECOVERY.sh' "$GITHUB_WORKSPACE/DP18-FULL-RECOVERY.sh" 'Build validated DP18 recovery v1.13.0'
+          publish_file 'manifest.sha256' "$GITHUB_WORKSPACE/manifest.sha256" 'Update manifest for DP18 recovery v1.13.0'
