@@ -8,6 +8,7 @@ on:
       - 'tools/build_v13.py'
       - 'tools/build_v16.py'
       - 'tools/build_v17.py'
+      - 'tools/build_v18.py'
 
 permissions:
   contents: write
@@ -18,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build validated v1.7 recovery
+      - name: Build validated v1.8 recovery
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -49,21 +50,23 @@ jobs:
           DP18_SFTP_PASSWORD='build-only-not-a-real-secret' "$TMP/hotfix-v1.2.sh"
           grep -q 'SCRIPT_VERSION="1.2.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
 
-          # v1.5: conversione DD40 + matricola nello stesso primo firmware.
           python3 "$WORK/tools/build_v13.py" "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'SCRIPT_VERSION="1.5.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
 
-          # v1.6: censimento modello/matricola storico e blocco sicuro dei non-DP18.
           python3 "$WORK/tools/build_v16.py" "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'SCRIPT_VERSION="1.6.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'SKIPPED_NON_DP18' "$WORK/DP18-FULL-RECOVERY.sh"
 
-          # v1.7: sincronizzazione diretta del registro nel repository GitHub.
           python3 "$WORK/tools/build_v17.py" "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'SCRIPT_VERSION="1.7.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'github_registry_sync()' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'registry/machines.tsv' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'DP18_GITHUB_TOKEN' "$WORK/DP18-FULL-RECOVERY.sh"
+
+          # v1.8: il token macchina puo' solo avviare il workflow GitHub di registro.
+          python3 "$WORK/tools/build_v18.py" "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'SCRIPT_VERSION="1.8.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'registry-dispatch.yml' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q '/actions/workflows/' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'REGISTRO GITHUB INVIATO' "$WORK/DP18-FULL-RECOVERY.sh"
 
           bash -n "$WORK/DP18-FULL-RECOVERY.sh"
           chmod +x "$WORK/DP18-FULL-RECOVERY.sh"
@@ -81,5 +84,5 @@ jobs:
             echo 'No generated changes'
             exit 0
           fi
-          git commit -m 'Build validated DP18 recovery v1.7.0'
+          git commit -m 'Build validated DP18 recovery v1.8.0'
           git push
