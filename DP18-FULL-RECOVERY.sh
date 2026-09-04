@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # DP18 FULL RECOVERY
-# SCRIPT_VERSION=1.3.0
+# SCRIPT_VERSION=1.4.0
 # Recovery autonomo DD40-00000 -> DP18-xxxxx:
 # - recupera matricola e prodotti dai Pardata storici
 # - converte MH430/Raspberry a DP18 3.12
@@ -12,7 +12,7 @@ set -Eeuo pipefail
 # - sopravvive ai reboot Raspberry tramite servizio systemd temporaneo
 # - lascia log e risultato persistenti, poi rimuove il servizio temporaneo.
 
-SCRIPT_VERSION="1.3.0-github"
+SCRIPT_VERSION="1.4.0-github"
 SELF="/root/DP18-FULL-RECOVERY.sh"
 SERVICE="dp18-full-recovery.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE"
@@ -4753,6 +4753,11 @@ ensure_dp18_software() {
 
     if wait_machine_dp18 900; then
       say "Raspberry ora identificato come DP18"
+      say "Attendo 90 secondi di stabilizzazione post-conversione prima di programmare la matricola"
+      sleep 90
+      [ "$(read_machine_name)" = "DP18" ] || fatal "DP18 non stabile dopo la conversione"
+      systemctl is-active paypoint >/dev/null 2>&1 || fatal "paypoint.service non attivo dopo stabilizzazione DP18"
+      say "DP18 stabile: posso iniziare il recupero matricola"
       return 0
     fi
 
@@ -4876,9 +4881,9 @@ recover_serial() {
     trigger_update "$serial_mha" "programmatore matricola $pad su firmware DP18 3.12"
     date +%s > "$SERIAL_PATCH_SENT"
     say "Programmatore seriale consegnato; NON riavvio ancora la MH430"
-    say "Attendo fino a 180 secondi che la patch dimostri di essere attiva (machine.serial=$num)"
+    say "Attendo fino a 300 secondi che la patch dimostri di essere attiva (machine.serial=$num)"
 
-    if ! wait_serial "$num" 180; then
+    if ! wait_serial "$num" 300; then
       say "La matricola non e' comparsa prima del reboot: non invio MHA vuoto; riprovo il firmware patchato"
       continue
     fi
@@ -4893,7 +4898,7 @@ recover_serial() {
 
     sleep 45
 
-    if wait_serial "$num" 180; then
+    if wait_serial "$num" 300; then
       say "Matricola $pad presente anche dopo reboot MH430: persistenza EEPROM confermata"
       break
     fi
