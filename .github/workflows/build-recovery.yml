@@ -82,6 +82,8 @@ jobs:
           python3 "$WORK/tools/build_v110.py" "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'SCRIPT_VERSION="1.10.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q '^ensure_final_312() {' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q '^apply_configuration() {' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q '^finish_success() {' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'ripristino firmware finale ufficiale DP18 3.12' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'funzione interna ensure_final_312 assente' "$WORK/DP18-FULL-RECOVERY.sh"
 
@@ -93,7 +95,7 @@ jobs:
               a=s.index(name+'() {')
               b=s.index('\n}\n\n',a)
               return s[a:b]
-          required = ['discover_history','extract_payloads','ensure_dp18_software','recover_serial','ensure_final_312','configure_and_verify','resume_main','bootstrap']
+          required = ['discover_history','extract_payloads','ensure_dp18_software','recover_serial','ensure_final_312','apply_configuration','finish_success','resume_main','bootstrap']
           for name in required:
               fn(name)
           boot=fn('bootstrap')
@@ -104,8 +106,9 @@ jobs:
           tail=s[s.index('say "DP18 FULL RECOVERY v$SCRIPT_VERSION - resume"'):]
           if 'discover_history' not in tail or 'extract_payloads' not in tail:
               raise SystemExit('resume path missing long recovery phase')
-          if 'ensure_final_312' not in tail or 'configure_and_verify' not in tail:
-              raise SystemExit('resume path missing final firmware/configuration stage')
+          for call in ['ensure_final_312','apply_configuration','finish_success']:
+              if call not in tail:
+                  raise SystemExit('resume path missing final stage: ' + call)
           PY
 
           bash -n "$WORK/DP18-FULL-RECOVERY.sh"
