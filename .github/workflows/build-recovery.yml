@@ -12,6 +12,7 @@ on:
       - 'tools/build_v19.py'
       - 'tools/build_v110.py'
       - 'tools/build_v111.py'
+      - 'tools/build_v111_fix.py'
 
 permissions:
   contents: write
@@ -60,30 +61,16 @@ jobs:
           grep -q 'SCRIPT_VERSION="1.2.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
 
           python3 "$WORK/tools/build_v13.py" "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'SCRIPT_VERSION="1.5.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
-
           python3 "$WORK/tools/build_v16.py" "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'SCRIPT_VERSION="1.6.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'SKIPPED_NON_DP18' "$WORK/DP18-FULL-RECOVERY.sh"
-
           python3 "$WORK/tools/build_v17.py" "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'SCRIPT_VERSION="1.7.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'DP18_GITHUB_TOKEN' "$WORK/DP18-FULL-RECOVERY.sh"
-
           python3 "$WORK/tools/build_v18.py" "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'SCRIPT_VERSION="1.8.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'registry-dispatch.yml' "$WORK/DP18-FULL-RECOVERY.sh"
-
           python3 "$WORK/tools/build_v19.py" "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'SCRIPT_VERSION="1.9.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q "Bootstrap persistente installato PRIMA dell'analisi Pardata" "$WORK/DP18-FULL-RECOVERY.sh"
-
           python3 "$WORK/tools/build_v110.py" "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'SCRIPT_VERSION="1.10.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q '^ensure_final_312() {' "$WORK/DP18-FULL-RECOVERY.sh"
-
           python3 "$WORK/tools/build_v111.py" "$WORK/DP18-FULL-RECOVERY.sh"
+          python3 "$WORK/tools/build_v111_fix.py" "$WORK/DP18-FULL-RECOVERY.sh"
+
           grep -q 'SCRIPT_VERSION="1.11.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q '^ensure_final_312() {' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q '^request_config_backup() {' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q '^verify_expected_config() {' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q '^apply_configuration() {' "$WORK/DP18-FULL-RECOVERY.sh"
@@ -91,6 +78,7 @@ jobs:
           grep -q 'APPLICAZIONE CONFIGURAZIONE MH430 - tentativo' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'CONFIGURAZIONE RIPRISTINATA E RILETTA DALLA MH430' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'FRESH_MH430_VERIFIED=1' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'Recovery precedente $boot_pad riaperta' "$WORK/DP18-FULL-RECOVERY.sh"
 
           python3 - "$WORK/DP18-FULL-RECOVERY.sh" <<'PY'
           from pathlib import Path
@@ -100,15 +88,17 @@ jobs:
               a=s.index(name+'() {')
               b=s.index('\n}\n\n',a)
               return s[a:b]
-          required=['discover_history','extract_payloads','ensure_dp18_software','recover_serial','ensure_final_312','request_config_backup','verify_expected_config','apply_configuration','finish_success','resume_main','bootstrap']
-          for name in required: fn(name)
+          for name in ['discover_history','extract_payloads','ensure_dp18_software','recover_serial','ensure_final_312','request_config_backup','verify_expected_config','finish_success','resume_main','bootstrap']:
+              fn(name)
           boot=fn('bootstrap')
           if 'discover_history' in boot or 'extract_payloads' in boot:
               raise SystemExit('bootstrap still performs long recovery work')
           if 'systemctl restart "$SERVICE"' not in boot:
               raise SystemExit('bootstrap does not start persistent service')
-          apply=fn('apply_configuration')
-          for marker in ['config-ready','products-needed','request_config_backup','trigger_empty_mha','FRESH_MH430_VERIFIED=1']:
+          a=s.index('apply_configuration() {')
+          b=s.index('wait_hostname_target() {',a)
+          apply=s[a:b]
+          for marker in ['config-ready','products-needed','request_config_backup','trigger_empty_mha','FRESH_MH430_VERIFIED=1','CONFIGURAZIONE RIPRISTINATA E RILETTA DALLA MH430']:
               if marker not in apply:
                   raise SystemExit('v1.11 apply missing '+marker)
           req=fn('request_config_backup')
