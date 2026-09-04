@@ -13,6 +13,7 @@ on:
       - 'tools/build_v110.py'
       - 'tools/build_v111.py'
       - 'tools/build_v111_fix.py'
+      - 'tools/build_v112.py'
 
 permissions:
   contents: write
@@ -29,7 +30,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build validated v1.11 recovery
+      - name: Build validated v1.12 recovery
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -58,7 +59,6 @@ jobs:
             "$TMP/hotfix-v1.2.sh"
           chmod +x "$TMP/hotfix-v1.2.sh"
           DP18_SFTP_PASSWORD='build-only-not-a-real-secret' "$TMP/hotfix-v1.2.sh"
-          grep -q 'SCRIPT_VERSION="1.2.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
 
           python3 "$WORK/tools/build_v13.py" "$WORK/DP18-FULL-RECOVERY.sh"
           python3 "$WORK/tools/build_v16.py" "$WORK/DP18-FULL-RECOVERY.sh"
@@ -68,17 +68,16 @@ jobs:
           python3 "$WORK/tools/build_v110.py" "$WORK/DP18-FULL-RECOVERY.sh"
           python3 "$WORK/tools/build_v111.py" "$WORK/DP18-FULL-RECOVERY.sh"
           python3 "$WORK/tools/build_v111_fix.py" "$WORK/DP18-FULL-RECOVERY.sh"
+          python3 "$WORK/tools/build_v112.py" "$WORK/DP18-FULL-RECOVERY.sh"
 
-          grep -q 'SCRIPT_VERSION="1.11.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'SCRIPT_VERSION="1.12.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q '^ensure_final_312() {' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q '^request_config_backup() {' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q '^verify_expected_config() {' "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q '^apply_configuration() {' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'Backup FRESCO acquisito dalla MH430' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'APPLICAZIONE CONFIGURAZIONE MH430 - tentativo' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'CONFIGURAZIONE RIPRISTINATA E RILETTA DALLA MH430' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'FRESH_MH430_VERIFIED=1' "$WORK/DP18-FULL-RECOVERY.sh"
-          grep -q 'Recovery precedente $boot_pad riaperta' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'protocollo v3.5' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'Installo DP18Config e segnalo config-ready + products-needed' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'PROTOCOL_V35_APPLIED=1' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'CONFIGURAZIONE RIPRISTINATA CON PROTOCOLLO v3.5 VALIDATO' "$WORK/DP18-FULL-RECOVERY.sh"
 
           python3 - "$WORK/DP18-FULL-RECOVERY.sh" <<'PY'
           from pathlib import Path
@@ -88,22 +87,27 @@ jobs:
               a=s.index(name+'() {')
               b=s.index('\n}\n\n',a)
               return s[a:b]
-          for name in ['discover_history','extract_payloads','ensure_dp18_software','recover_serial','ensure_final_312','request_config_backup','verify_expected_config','finish_success','resume_main','bootstrap']:
+          for name in ['discover_history','extract_payloads','ensure_dp18_software','recover_serial','ensure_final_312','request_config_backup','finish_success','resume_main','bootstrap']:
               fn(name)
           boot=fn('bootstrap')
           if 'discover_history' in boot or 'extract_payloads' in boot:
               raise SystemExit('bootstrap still performs long recovery work')
           if 'systemctl restart "$SERVICE"' not in boot:
               raise SystemExit('bootstrap does not start persistent service')
+          req=fn('request_config_backup')
+          if 'rm -f "$config"' in req:
+              raise SystemExit('v1.12 must NOT delete DP18Config.txt during config-needed backup')
+          for marker in ['config-needed','config-file-ready','DP18Config.txt']:
+              if marker not in req:
+                  raise SystemExit('v1.12 backup missing '+marker)
           a=s.index('apply_configuration() {')
           b=s.index('wait_hostname_target() {',a)
           apply=s[a:b]
-          for marker in ['config-ready','products-needed','request_config_backup','trigger_empty_mha','FRESH_MH430_VERIFIED=1','CONFIGURAZIONE RIPRISTINATA E RILETTA DALLA MH430']:
+          for marker in ['touch "$config_ready"','touch "$products_needed"','wait_marker_gone "$config_ready"','wait_marker_gone "$products_needed"','request_config_backup "$verifycfg"','PROTOCOL_V35_APPLIED=1']:
               if marker not in apply:
-                  raise SystemExit('v1.11 apply missing '+marker)
-          req=fn('request_config_backup')
-          if 'rm -f "$config"' not in req:
-              raise SystemExit('fresh backup does not remove stale DP18Config.txt')
+                  raise SystemExit('v1.12 apply missing '+marker)
+          if apply.index('touch "$config_ready"') > apply.index('touch "$products_needed"'):
+              pass
           tail=s[s.index('say "DP18 FULL RECOVERY v$SCRIPT_VERSION - resume"'):]
           for call in ['ensure_final_312','apply_configuration','finish_success']:
               if call not in tail:
@@ -126,7 +130,7 @@ jobs:
             echo 'No generated changes'
             exit 0
           fi
-          git commit -m 'Build validated DP18 recovery v1.11.0'
+          git commit -m 'Build validated DP18 recovery v1.12.0'
 
           for TRY in 1 2 3 4 5; do
             if git push origin HEAD:main; then
