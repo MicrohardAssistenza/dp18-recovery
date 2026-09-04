@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # DP18 FULL RECOVERY
-# SCRIPT_VERSION=1.8.0
+# SCRIPT_VERSION=1.9.0
 # Recovery autonomo DD40-00000 -> DP18-xxxxx:
 # - recupera matricola e prodotti dai Pardata storici
 # - converte MH430/Raspberry a DP18 3.12 usando gia' il firmware patchato con la matricola storica
@@ -12,7 +12,7 @@ set -Eeuo pipefail
 # - sopravvive ai reboot Raspberry tramite servizio systemd temporaneo
 # - lascia log e risultato persistenti, poi rimuove il servizio temporaneo.
 
-SCRIPT_VERSION="1.8.0-github"
+SCRIPT_VERSION="1.9.0-github"
 SELF="/root/DP18-FULL-RECOVERY.sh"
 SERVICE="dp18-full-recovery.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE"
@@ -4492,7 +4492,7 @@ detect_historical_identity() {
     return 0
   fi
 
-  php -d open_basedir= -r '
+  php -d open_basedir= -d date.timezone=UTC -r '
 $dirs=array("/root/sent","/root/send","/root/delayedsend");
 $best=false;
 foreach($dirs as $dir){
@@ -4577,7 +4577,7 @@ github_registry_sync() {
     printf 'header = "X-GitHub-Api-Version: 2022-11-28"\n'
   } > "$cfg"
 
-  php -d open_basedir= -r '
+  php -d open_basedir= -d date.timezone=UTC -r '
 $payload=array(
   "ref"=>"main",
   "inputs"=>array(
@@ -4842,7 +4842,7 @@ file_put_contents($argv[4], json_encode($summary, JSON_PRETTY_PRINT|JSON_UNESCAP
 ?>
 PHP
 
-  if ! php -d open_basedir= "$phpfile" "$TARGET_FILE" "$LATEST_MH_FILE" "$PRODUCTS_FILE" "$ANALYSIS_JSON"; then
+  if ! php -d open_basedir= -d date.timezone=UTC "$phpfile" "$TARGET_FILE" "$LATEST_MH_FILE" "$PRODUCTS_FILE" "$ANALYSIS_JSON"; then
     fatal "analisi Pardata fallita: impossibile ricavare una matricola DP18 storica affidabile"
   fi
 
@@ -5265,7 +5265,7 @@ apply_configuration() {
   say "Richiedo alla MH430 il backup della configurazione corrente"
   request_config_backup "$basecfg"
 
-  php -d open_basedir= -r '
+  php -d open_basedir= -d date.timezone=UTC -r '
 function set_section_key($s,$section,$key,$value){
   $sp="/(?ms)^\\[".preg_quote($section,"/")."\\]\\R.*?(?=^\\[|\\z)/";
   if(!preg_match($sp,$s,$m,PREG_OFFSET_CAPTURE)){
@@ -5524,7 +5524,7 @@ resume_main() {
 
 bootstrap() {
   require_root
-  for c in bash php base64 gzip od dd awk sed grep sort cp mv sync sha256sum seq tee wc tr date hostname sleep systemctl stat find head cat mkdir rm chmod; do
+  for c in bash php base64 gzip od dd awk sed grep sort cp mv sync sha256sum seq tee wc tr date hostname sleep systemctl stat find head cat mkdir rm chmod curl; do
     need "$c"
   done
 
@@ -5534,6 +5534,9 @@ bootstrap() {
   local boot_name boot_serial boot_pad saved_pad
   boot_name="$(read_machine_name)"
   boot_serial="$(read_machine_serial || true)"
+
+  # Non agganciare una DP18 gia' matricolata se non appartiene chiaramente
+  # a un recovery persistente gia' iniziato da noi.
   if [ "$boot_name" = "DP18" ]; then
     case "$boot_serial" in
       ''|*[!0-9]*) ;;
@@ -5566,8 +5569,12 @@ bootstrap() {
     esac
   fi
 
-  rm -f "$FAILED_FILE"
-  rm -f "$SERIAL_ATTEMPTS"
+  case "$boot_name" in
+    DD40|DP18) ;;
+    *) fatal "machine.name non supportato: '${boot_name:-vuoto}'" ;;
+  esac
+
+  rm -f "$FAILED_FILE" "$SERIAL_ATTEMPTS"
 
   if [ -n "${DP18_SFTP_PASSWORD:-}" ]; then
     umask 077
@@ -5585,18 +5592,8 @@ bootstrap() {
 
   capture_original_info
 
-  discover_history
-  extract_payloads
-
-  local pad name
-  pad="$(tr -d '\r\n ' < "$TARGET_FILE")"
-  name="$(read_machine_name)"
-
-  case "$name" in
-    DD40|DP18) ;;
-    *) fatal "machine.name non supportato: '${name:-vuoto}'" ;;
-  esac
-
+  # CRITICO: installiamo il service PRIMA di analisi Pardata, estrazione payload
+  # e qualunque operazione lunga. Da questo punto la sessione SSH puo' cadere.
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=DP18 Full Automatic Recovery
@@ -5615,13 +5612,12 @@ EOF
   systemctl daemon-reload
   systemctl enable "$SERVICE" >/dev/null
 
-  say "Bootstrap installato"
-  echo "Target matricola : $pad"
-  echo "Tipo attuale     : $name"
+  say "Bootstrap persistente installato PRIMA dell'analisi Pardata"
+  echo "Tipo attuale     : $boot_name"
   echo "Servizio         : $SERVICE"
   echo "Log persistente  : $LOG"
   echo
-  echo "Da questo momento puoi perdere la sessione SSH/VPN: il recovery prosegue da solo."
+  echo "Da questo momento puoi perdere la sessione SSH/VPN: analisi e recovery proseguono in systemd."
   echo "Anche un reboot del Raspberry e' gestito automaticamente."
 
   systemctl restart "$SERVICE"
