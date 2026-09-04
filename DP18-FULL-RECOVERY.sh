@@ -2,17 +2,17 @@
 set -Eeuo pipefail
 
 # DP18 FULL RECOVERY
-# SCRIPT_VERSION=1.4.0
+# SCRIPT_VERSION=1.5.0
 # Recovery autonomo DD40-00000 -> DP18-xxxxx:
 # - recupera matricola e prodotti dai Pardata storici
-# - converte MH430/Raspberry a DP18 3.12
-# - recupera la matricola MH430 via patch EEPROM nativa DP18 3.12 validata sul campo
+# - converte MH430/Raspberry a DP18 3.12 usando gia' il firmware patchato con la matricola storica
+# - recupera la matricola MH430 via patch EEPROM nativa DP18 3.12
 # - ripristina firmware finale DP18 3.12
 # - ricostruisce configurazione prodotti/network
 # - sopravvive ai reboot Raspberry tramite servizio systemd temporaneo
 # - lascia log e risultato persistenti, poi rimuove il servizio temporaneo.
 
-SCRIPT_VERSION="1.4.0-github"
+SCRIPT_VERSION="1.5.0-github"
 SELF="/root/DP18-FULL-RECOVERY.sh"
 SERVICE="dp18-full-recovery.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE"
@@ -33,6 +33,8 @@ SERIAL_PATCH_SENT="$STATE/serial_patch.sent"
 SERIAL_EMPTY_SENT="$STATE/serial_empty.sent"
 SERIAL_ATTEMPTS="$STATE/serial_attempts"
 CONFIG_DONE="$STATE/config.done"
+COMBINED_SENT="$STATE/conversion_serial_312.sent"
+SERIAL_PERSIST_OK="$STATE/serial_persistence.ok"
 SECRET_FILE="$STATE/sftp_password"
 
 OFFICIAL312="$PAYLOADS/UsbUpdate_DP18_DUREX.3.12.mha"
@@ -4721,12 +4723,41 @@ wait_machine_dp18() {
 }
 
 ensure_dp18_software() {
-  local name
+  local name pad num current serial_mha attempt
+  pad="$(tr -d '\r\n ' < "$TARGET_FILE")"
+  num=$((10#$pad))
   name="$(read_machine_name)"
+  current="$(read_machine_serial || true)"
+
+  case "$current" in
+    ""|*[!0-9]*) fatal "impossibile leggere /root/machine.serial durante conversione" ;;
+  esac
 
   case "$name" in
     DP18)
+      if [ "$current" = "$num" ]; then
+        say "Software Raspberry gia' DP18 e matricola gia' acquisita: $pad"
+        return 0
+      fi
+      [ "$current" = "0" ] || fatal "DP18 con matricola non-zero $current diversa dal target $num"
+
+      if [ -e "$COMBINED_SENT" ]; then
+        say "DP18 rilevata dopo il firmware combinato; attendo la matricola $pad senza inviare un secondo firmware"
+        wait_paypoint 300 || fatal "paypoint.service non attivo dopo conversione combinata"
+        if wait_serial "$num" 300; then
+          say "Conversione combinata riuscita: Raspberry ha ricevuto la matricola $pad dalla MH430"
+          return 0
+        fi
+        say "Matricola non comparsa dal primo firmware combinato: passo al programmatore seriale di fallback"
+        return 0
+      fi
+
       say "Software Raspberry gia' DP18"
+      if [ -e "$CONVERSION_SENT" ]; then
+        say "Conversione legacy rilevata: attendo 90 secondi di stabilizzazione prima del fallback seriale"
+        sleep 90
+        wait_paypoint 300 || fatal "paypoint.service non attivo dopo stabilizzazione DP18"
+      fi
       return 0
       ;;
     DD40)
@@ -4736,7 +4767,9 @@ ensure_dp18_software() {
       ;;
   esac
 
-  local attempt=1
+  serial_mha="$(make_serial_mha "$num" "$pad")"
+
+  attempt=1
   if [ -r "$STATE/conversion_attempts" ]; then
     attempt="$(cat "$STATE/conversion_attempts" 2>/dev/null || echo 1)"
   fi
@@ -4744,20 +4777,40 @@ ensure_dp18_software() {
   while [ "$attempt" -le 3 ]; do
     if [ ! -e "$CONVERSION_SENT" ]; then
       echo "$attempt" > "$STATE/conversion_attempts"
-      trigger_update "$OFFICIAL312" "conversione DD40 -> DP18 firmware 3.12 (tentativo $attempt)"
+      date +%s > "$COMBINED_SENT"
+      trigger_update "$serial_mha" "conversione DD40 -> DP18 firmware 3.12 + matricola $pad (tentativo $attempt)"
       date +%s > "$CONVERSION_SENT"
-      say "Pacchetto DP18 3.12 consegnato. La macchina puo' riavviare il Raspberry: il recovery ripartira' automaticamente."
+      say "Pacchetto unico DP18 3.12 + matricola $pad consegnato. Eventuali reboot Raspberry sono gestiti automaticamente."
     else
-      say "Conversione DP18 gia' richiesta in una esecuzione precedente; attendo lo stato della macchina"
+      if [ -e "$COMBINED_SENT" ]; then
+        say "Conversione combinata DP18 + matricola gia' richiesta; attendo lo stato della macchina"
+      else
+        say "Conversione DP18 legacy gia' richiesta; attendo lo stato della macchina"
+      fi
     fi
 
     if wait_machine_dp18 900; then
       say "Raspberry ora identificato come DP18"
-      say "Attendo 90 secondi di stabilizzazione post-conversione prima di programmare la matricola"
+      wait_paypoint 300 || fatal "paypoint.service non attivo dopo conversione DP18"
+
+      if [ -e "$COMBINED_SENT" ]; then
+        current="$(read_machine_serial || true)"
+        if [ "$current" = "$num" ]; then
+          say "Matricola $pad acquisita direttamente durante la conversione"
+          return 0
+        fi
+        say "Attendo fino a 300 secondi la matricola $pad dal firmware combinato"
+        if wait_serial "$num" 300; then
+          say "Matricola $pad acquisita direttamente durante la conversione"
+          return 0
+        fi
+        say "Conversione completata ma matricola ancora 00000: usero' il fallback seriale senza riconvertire il Raspberry"
+        return 0
+      fi
+
+      say "Conversione legacy completata; attendo 90 secondi di stabilizzazione"
       sleep 90
-      [ "$(read_machine_name)" = "DP18" ] || fatal "DP18 non stabile dopo la conversione"
-      systemctl is-active paypoint >/dev/null 2>&1 || fatal "paypoint.service non attivo dopo stabilizzazione DP18"
-      say "DP18 stabile: posso iniziare il recupero matricola"
+      wait_paypoint 300 || fatal "paypoint.service non attivo dopo stabilizzazione DP18"
       return 0
     fi
 
@@ -4765,9 +4818,9 @@ ensure_dp18_software() {
     [ "$name" = "DP18" ] && return 0
 
     attempt=$((attempt+1))
-    rm -f "$CONVERSION_SENT"
+    rm -f "$CONVERSION_SENT" "$COMBINED_SENT"
     echo "$attempt" > "$STATE/conversion_attempts"
-    say "DP18 non ancora rilevato: preparo un nuovo tentativo"
+    say "DP18 non ancora rilevato: preparo un nuovo tentativo combinato"
   done
 
   fatal "conversione DD40 -> DP18 non completata dopo 3 tentativi"
@@ -4846,6 +4899,40 @@ wait_serial() {
   return 1
 }
 
+confirm_serial_persistence() {
+  local pad="$1" num="$2" current
+
+  current="$(read_machine_serial || true)"
+  [ "$current" = "$num" ] || return 1
+
+  if [ -e "$SERIAL_PERSIST_OK" ]; then
+    say "Persistenza EEPROM matricola $pad gia' confermata"
+    return 0
+  fi
+
+  if [ ! -e "$COMBINED_SENT" ] && [ ! -e "$SERIAL_PATCH_SENT" ]; then
+    say "Matricola $pad gia' presente prima del programmatore: nessun test EEPROM aggiuntivo necessario"
+    return 0
+  fi
+
+  say "Matricola $pad visibile; confermo la persistenza EEPROM con un reboot MH430 controllato"
+  sleep 10
+  trigger_empty_mha
+  date +%s > "$SERIAL_EMPTY_SENT"
+  say "Reboot MH430 richiesto dopo conferma della matricola in RAM"
+  sleep 45
+
+  if wait_serial "$num" 300; then
+    date +%s > "$SERIAL_PERSIST_OK"
+    say "Matricola $pad presente anche dopo reboot MH430: persistenza EEPROM confermata"
+    return 0
+  fi
+
+  say "Matricola $pad persa dopo reboot MH430"
+  rm -f "$SERIAL_EMPTY_SENT" "$SERIAL_PERSIST_OK"
+  return 1
+}
+
 recover_serial() {
   local pad num current serial_mha attempts
   pad="$(tr -d '\r\n ' < "$TARGET_FILE")"
@@ -4860,6 +4947,9 @@ recover_serial() {
 
   if [ "$current" = "$num" ]; then
     say "Matricola MH430 gia' corretta: $pad"
+    if [ -e "$COMBINED_SENT" ] || [ -e "$SERIAL_PATCH_SENT" ]; then
+      confirm_serial_persistence "$pad" "$num" || fatal "matricola $pad non persistente dopo reboot MH430"
+    fi
     return 0
   fi
 
@@ -4872,58 +4962,40 @@ recover_serial() {
 
   while [ "$attempts" -lt 3 ]; do
     current="$(read_machine_serial || true)"
-    [ "$current" = "$num" ] && break
+    if [ "$current" = "$num" ]; then
+      confirm_serial_persistence "$pad" "$num" && break
+    fi
 
     attempts=$((attempts+1))
     echo "$attempts" > "$SERIAL_ATTEMPTS"
-    rm -f "$SERIAL_PATCH_SENT" "$SERIAL_EMPTY_SENT"
+    rm -f "$SERIAL_PATCH_SENT" "$SERIAL_EMPTY_SENT" "$SERIAL_PERSIST_OK"
 
-    trigger_update "$serial_mha" "programmatore matricola $pad su firmware DP18 3.12"
+    trigger_update "$serial_mha" "programmatore matricola $pad su firmware DP18 3.12 (fallback $attempts)"
     date +%s > "$SERIAL_PATCH_SENT"
-    say "Programmatore seriale consegnato; NON riavvio ancora la MH430"
+    say "Programmatore seriale di fallback consegnato; NON riavvio ancora la MH430"
     say "Attendo fino a 300 secondi che la patch dimostri di essere attiva (machine.serial=$num)"
 
     if ! wait_serial "$num" 300; then
-      say "La matricola non e' comparsa prima del reboot: non invio MHA vuoto; riprovo il firmware patchato"
+      say "La matricola non e' comparsa: non invio MHA vuoto; riprovo il firmware patchato"
       continue
     fi
 
     say "Patch seriale ATTIVA: Raspberry ha ricevuto la matricola $pad dalla MH430"
-    say "Attendo altri 10 secondi prima del reboot per lasciare completare il salvataggio EEPROM"
-    sleep 10
-
-    trigger_empty_mha
-    date +%s > "$SERIAL_EMPTY_SENT"
-    say "Reboot MH430 richiesto solo dopo conferma della matricola in RAM"
-
-    sleep 45
-
-    if wait_serial "$num" 300; then
-      say "Matricola $pad presente anche dopo reboot MH430: persistenza EEPROM confermata"
+    if confirm_serial_persistence "$pad" "$num"; then
       break
     fi
 
-    say "Matricola persa dopo reboot MH430: riprovo il ciclo seriale"
-    rm -f "$SERIAL_PATCH_SENT" "$SERIAL_EMPTY_SENT"
+    say "Persistenza non confermata: riprovo il ciclo seriale"
   done
 
   current="$(read_machine_serial || true)"
-  [ "$current" = "$num" ] || fatal "recupero matricola $pad fallito dopo 3 tentativi"
+  [ "$current" = "$num" ] || fatal "recupero matricola $pad fallito dopo 3 tentativi di fallback"
 
-  say "Matricola recuperata e confermata dalla MH430: $pad"
-}
-ensure_final_312() {
-  if [ -e "$FINAL312_SENT" ]; then
-    say "Firmware finale DP18 3.12 gia' richiesto; non ripeto il flash"
-    wait_paypoint 300 || fatal "paypoint.service non attivo dopo firmware finale"
-    return 0
+  if [ -e "$COMBINED_SENT" ] || [ -e "$SERIAL_PATCH_SENT" ]; then
+    [ -e "$SERIAL_PERSIST_OK" ] || fatal "matricola $pad presente ma persistenza EEPROM non confermata"
   fi
 
-  trigger_update "$OFFICIAL312" "ripristino firmware finale ufficiale DP18 3.12"
-  date +%s > "$FINAL312_SENT"
-  say "Firmware finale DP18 3.12 consegnato. Eventuali reboot Raspberry sono gestiti automaticamente."
-  sleep 30
-  wait_paypoint 300 || fatal "paypoint.service non tornato attivo dopo firmware finale"
+  say "Matricola recuperata e confermata dalla MH430: $pad"
 }
 
 wait_marker_gone() {
@@ -5260,8 +5332,6 @@ bootstrap() {
   mkdir -p "$STATE" "$PAYLOADS"
   chmod 700 "$STATE" "$PAYLOADS"
 
-  # Idempotenza: una DP18 gia' dotata di seriale non-zero non viene mai
-  # riportata dentro la procedura di discovery/flash per errore.
   local boot_name boot_serial boot_pad saved_pad
   boot_name="$(read_machine_name)"
   boot_serial="$(read_machine_serial || true)"
@@ -5273,24 +5343,32 @@ bootstrap() {
         boot_pad="$(printf '%05d' "$boot_serial")"
         saved_pad=""
         [ -r "$TARGET_FILE" ] && saved_pad="$(tr -d '\r\n ' < "$TARGET_FILE")"
-        if [ -z "$saved_pad" ] || [ "$saved_pad" = "$boot_pad" ]; then
+
+        if [ -z "$saved_pad" ]; then
           say "Macchina gia' DP18 con matricola non-zero: $boot_pad"
-          if [ -f "/root/DP18_RECOVERY_OK_${boot_pad}.txt" ] || [ -e "$CONFIG_DONE" ]; then
-            say "Recovery gia' completata: non eseguo nuovamente analisi Pardata o flash"
-          else
-            say "Nessuno stato completo disponibile: per sicurezza non sovrascrivo una DP18 gia' matricolata"
-          fi
+          say "Nessuno stato recovery persistente: per sicurezza non modifico la macchina"
           cleanup_service
           rm -f "$SECRET_FILE" 2>/dev/null || true
           return 0
         fi
-        fatal "DP18 gia' matricolata $boot_pad ma stato persistente indica $saved_pad: non procedo"
+
+        [ "$saved_pad" = "$boot_pad" ] \
+          || fatal "DP18 gia' matricolata $boot_pad ma stato persistente indica $saved_pad: non procedo"
+
+        if [ -f "/root/DP18_RECOVERY_OK_${boot_pad}.txt" ] || [ -e "$DONE_FILE" ]; then
+          say "Recovery $boot_pad gia' completata: non eseguo nuovamente flash o configurazione"
+          cleanup_service
+          rm -f "$SECRET_FILE" 2>/dev/null || true
+          return 0
+        fi
+
+        say "DP18-$boot_pad coerente con lo stato recovery: riprendo gli step mancanti"
         ;;
     esac
   fi
 
   rm -f "$FAILED_FILE"
-  rm -f "$SERIAL_PATCH_SENT" "$SERIAL_EMPTY_SENT" "$SERIAL_ATTEMPTS" "$FINAL312_SENT" "$CONFIG_DONE"
+  rm -f "$SERIAL_ATTEMPTS"
 
   if [ -n "${DP18_SFTP_PASSWORD:-}" ]; then
     umask 077
@@ -5300,7 +5378,6 @@ bootstrap() {
   [ -s "$SECRET_FILE" ] || fatal "DP18_SFTP_PASSWORD non fornita al bootstrap"
   capture_original_info
 
-  # Verifica subito storico e payload: non tocchiamo MH430 se qualcosa non torna.
   discover_history
   extract_payloads
 
