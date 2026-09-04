@@ -10,6 +10,7 @@ on:
       - 'tools/build_v17.py'
       - 'tools/build_v18.py'
       - 'tools/build_v19.py'
+      - 'tools/build_v110.py'
 
 permissions:
   contents: write
@@ -26,7 +27,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build validated v1.9 recovery
+      - name: Build validated v1.10 recovery
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -78,6 +79,12 @@ jobs:
           grep -q "Bootstrap persistente installato PRIMA dell'analisi Pardata" "$WORK/DP18-FULL-RECOVERY.sh"
           grep -q 'date.timezone=UTC' "$WORK/DP18-FULL-RECOVERY.sh"
 
+          python3 "$WORK/tools/build_v110.py" "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'SCRIPT_VERSION="1.10.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q '^ensure_final_312() {' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'ripristino firmware finale ufficiale DP18 3.12' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'funzione interna ensure_final_312 assente' "$WORK/DP18-FULL-RECOVERY.sh"
+
           python3 - "$WORK/DP18-FULL-RECOVERY.sh" <<'PY'
           from pathlib import Path
           import sys
@@ -86,6 +93,9 @@ jobs:
               a=s.index(name+'() {')
               b=s.index('\n}\n\n',a)
               return s[a:b]
+          required = ['discover_history','extract_payloads','ensure_dp18_software','recover_serial','ensure_final_312','configure_and_verify','resume_main','bootstrap']
+          for name in required:
+              fn(name)
           boot=fn('bootstrap')
           if 'discover_history' in boot or 'extract_payloads' in boot:
               raise SystemExit('bootstrap still performs long recovery work')
@@ -94,6 +104,8 @@ jobs:
           tail=s[s.index('say "DP18 FULL RECOVERY v$SCRIPT_VERSION - resume"'):]
           if 'discover_history' not in tail or 'extract_payloads' not in tail:
               raise SystemExit('resume path missing long recovery phase')
+          if 'ensure_final_312' not in tail or 'configure_and_verify' not in tail:
+              raise SystemExit('resume path missing final firmware/configuration stage')
           PY
 
           bash -n "$WORK/DP18-FULL-RECOVERY.sh"
@@ -112,7 +124,7 @@ jobs:
             echo 'No generated changes'
             exit 0
           fi
-          git commit -m 'Build validated DP18 recovery v1.9.0'
+          git commit -m 'Build validated DP18 recovery v1.10.0'
 
           for TRY in 1 2 3 4 5; do
             if git push origin HEAD:main; then
