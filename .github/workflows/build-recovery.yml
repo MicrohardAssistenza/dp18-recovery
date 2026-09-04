@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build validated v1.3 recovery
+      - name: Build validated v1.5 recovery
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -29,7 +29,7 @@ jobs:
           curl -fsSL "$OLD_RAW/install-v1.1.sh" -o "$TMP/install-v1.1.sh"
           curl -fsSL "$OLD_RAW/hotfix-v1.2.sh" -o "$TMP/hotfix-v1.2.sh"
 
-          # Costruisce la v1.1 completa senza avviare il bootstrap.
+          # Costruisce la base v1.1 completa senza avviare il bootstrap.
           sed -i \
             -e "s#^BASE_URL=.*#BASE_URL='${OLD_RAW}/DP18-FULL-RECOVERY-GITHUB.sh'#" \
             -e "s#^OUT=.*#OUT='${WORK}/DP18-FULL-RECOVERY.sh'#" \
@@ -40,8 +40,7 @@ jobs:
 
           grep -q 'SCRIPT_VERSION="1.1.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
 
-          # Applica la sequenza seriale v1.2 validata sulla DP18-02514,
-          # ma non esegue il bootstrap dentro il runner GitHub.
+          # Applica la sequenza seriale v1.2 validata sul campo come base.
           sed -i \
             -e "s#^TARGET=.*#TARGET='${WORK}/DP18-FULL-RECOVERY.sh'#" \
             -e "s#^STATE=.*#STATE='${WORK}/.build-state'#" \
@@ -52,7 +51,8 @@ jobs:
 
           grep -q 'SCRIPT_VERSION="1.2.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
 
-          # Aggiunge idempotenza/stato persistente v1.3.
+          # Costruisce la v1.5: conversione DD40 e programmazione matricola nello
+          # stesso primo firmware DP18 3.12, con fallback seriale e idempotenza.
           python3 "$WORK/tools/build_v13.py" "$WORK/DP18-FULL-RECOVERY.sh"
 
           bash -n "$WORK/DP18-FULL-RECOVERY.sh"
@@ -71,5 +71,5 @@ jobs:
             echo 'No generated changes'
             exit 0
           fi
-          git commit -m 'Build validated DP18 recovery v1.3.0'
+          git commit -m 'Build validated DP18 recovery v1.5.0'
           git push
