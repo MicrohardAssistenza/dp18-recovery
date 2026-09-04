@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/build-recovery.yml'
       - 'tools/build_v13.py'
+      - 'tools/build_v16.py'
 
 permissions:
   contents: write
@@ -16,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build validated v1.5 recovery
+      - name: Build validated v1.6 recovery
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -29,7 +30,6 @@ jobs:
           curl -fsSL "$OLD_RAW/install-v1.1.sh" -o "$TMP/install-v1.1.sh"
           curl -fsSL "$OLD_RAW/hotfix-v1.2.sh" -o "$TMP/hotfix-v1.2.sh"
 
-          # Costruisce la base v1.1 completa senza avviare il bootstrap.
           sed -i \
             -e "s#^BASE_URL=.*#BASE_URL='${OLD_RAW}/DP18-FULL-RECOVERY-GITHUB.sh'#" \
             -e "s#^OUT=.*#OUT='${WORK}/DP18-FULL-RECOVERY.sh'#" \
@@ -37,10 +37,8 @@ jobs:
             "$TMP/install-v1.1.sh"
           chmod +x "$TMP/install-v1.1.sh"
           DP18_SFTP_PASSWORD='build-only-not-a-real-secret' "$TMP/install-v1.1.sh"
-
           grep -q 'SCRIPT_VERSION="1.1.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
 
-          # Applica la sequenza seriale v1.2 validata sul campo come base.
           sed -i \
             -e "s#^TARGET=.*#TARGET='${WORK}/DP18-FULL-RECOVERY.sh'#" \
             -e "s#^STATE=.*#STATE='${WORK}/.build-state'#" \
@@ -48,12 +46,17 @@ jobs:
             "$TMP/hotfix-v1.2.sh"
           chmod +x "$TMP/hotfix-v1.2.sh"
           DP18_SFTP_PASSWORD='build-only-not-a-real-secret' "$TMP/hotfix-v1.2.sh"
-
           grep -q 'SCRIPT_VERSION="1.2.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
 
-          # Costruisce la v1.5: conversione DD40 e programmazione matricola nello
-          # stesso primo firmware DP18 3.12, con fallback seriale e idempotenza.
+          # v1.5: conversione DD40 + matricola nello stesso primo firmware.
           python3 "$WORK/tools/build_v13.py" "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'SCRIPT_VERSION="1.5.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
+
+          # v1.6: censimento modello/matricola storico e blocco sicuro dei non-DP18.
+          python3 "$WORK/tools/build_v16.py" "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'SCRIPT_VERSION="1.6.0-github"' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'SKIPPED_NON_DP18' "$WORK/DP18-FULL-RECOVERY.sh"
+          grep -q 'DD40_RECOVERY_CENSUS.tsv' "$WORK/DP18-FULL-RECOVERY.sh"
 
           bash -n "$WORK/DP18-FULL-RECOVERY.sh"
           chmod +x "$WORK/DP18-FULL-RECOVERY.sh"
@@ -71,5 +74,5 @@ jobs:
             echo 'No generated changes'
             exit 0
           fi
-          git commit -m 'Build validated DP18 recovery v1.5.0'
+          git commit -m 'Build validated DP18 recovery v1.6.0'
           git push
