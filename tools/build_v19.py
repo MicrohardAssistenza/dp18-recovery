@@ -2,6 +2,7 @@
 from pathlib import Path
 import sys
 
+# v1.9 build retrigger: registry writes are serialized independently.
 p = Path(sys.argv[1])
 s = p.read_text()
 
