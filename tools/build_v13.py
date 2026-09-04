@@ -5,8 +5,8 @@ import sys
 p = Path(sys.argv[1] if len(sys.argv) > 1 else 'DP18-FULL-RECOVERY.sh')
 s = p.read_text()
 
-s = s.replace('# SCRIPT_VERSION=1.2.0', '# SCRIPT_VERSION=1.3.0', 1)
-s = s.replace('SCRIPT_VERSION="1.2.0-github"', 'SCRIPT_VERSION="1.3.0-github"', 1)
+s = s.replace('# SCRIPT_VERSION=1.2.0', '# SCRIPT_VERSION=1.4.0', 1)
+s = s.replace('SCRIPT_VERSION="1.2.0-github"', 'SCRIPT_VERSION="1.4.0-github"', 1)
 
 old = '''  if [ -s "$TARGET_FILE" ] && [ -f "$PRODUCTS_FILE" ] && [ -f "$ANALYSIS_JSON" ]; then
     return 0
@@ -66,11 +66,33 @@ if old not in s:
     raise SystemExit('bootstrap anchor not found')
 s = s.replace(old, new, 1)
 
+old = '''    if wait_machine_dp18 900; then
+      say "Raspberry ora identificato come DP18"
+      return 0
+    fi'''
+new = '''    if wait_machine_dp18 900; then
+      say "Raspberry ora identificato come DP18"
+      say "Attendo 90 secondi di stabilizzazione post-conversione prima di programmare la matricola"
+      sleep 90
+      [ "$(read_machine_name)" = "DP18" ] || fatal "DP18 non stabile dopo la conversione"
+      systemctl is-active paypoint >/dev/null 2>&1 || fatal "paypoint.service non attivo dopo stabilizzazione DP18"
+      say "DP18 stabile: posso iniziare il recupero matricola"
+      return 0
+    fi'''
+if old not in s:
+    raise SystemExit('post-conversion anchor not found')
+s = s.replace(old, new, 1)
+
+s = s.replace('wait_serial "$num" 180', 'wait_serial "$num" 300')
+s = s.replace('Attendo fino a 180 secondi che la patch dimostri di essere attiva', 'Attendo fino a 300 secondi che la patch dimostri di essere attiva')
+
 s = s.replace('via patch EEPROM nativa DP18 3.12', 'via patch EEPROM nativa DP18 3.12 validata sul campo', 1)
 
 if 'NON riavvio ancora la MH430' not in s:
     raise SystemExit('v1.2 serial sequencing not present')
-if 'SCRIPT_VERSION="1.3.0-github"' not in s:
+if 'SCRIPT_VERSION="1.4.0-github"' not in s:
     raise SystemExit('version update failed')
+if 'stabilizzazione post-conversione' not in s:
+    raise SystemExit('post-conversion stabilization not present')
 
 p.write_text(s)
