@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "purpose": "Offline-validated MH430 legacy recovery constants. No live flashing is performed by this file.",
+  "models": {
+    "DP30": {
+      "latest": {
+        "version": "3.12",
+        "mha_name": "UsbUpdate_DP30_DUREX.3.12.mha",
+        "mha_sha256": "ab4643f0641a825285bf2595ea813018468f3e93b31395818ce9e30544e8687f",
+        "mha_size": 236776,
+        "firmware_name": "MH430_DP30.3.12.bin",
+        "firmware_size": 236664,
+        "firmware_sha256": "4e97110f5b77e7ddfc40167d594507fcd093c387a0f1c9e62301f6193d48f033"
+      },
+      "previous_validation": {
+        "version": "3.11",
+        "mha_sha256": "8cf60d6b91162c881e1e461588d37563c46f5ec1b450c29aa72f340b8110d60d",
+        "firmware_size": 236468
+      },
+      "serial_patch": {
+        "hook_binary_offset": "0x07c4",
+        "hook_mha_offset": "0x0810",
+        "original_hook_bytes": "00b5d9b0",
+        "branch_bytes": "39f070b8",
+        "shell_binary_offset": "0x398a8",
+        "shell_mha_offset": "0x398f4",
+        "serial_mha_offset_in_patched_image": "0x39928",
+        "config_ram": "0x1000696c",
+        "serial_field_offset": 8,
+        "save_routine_thumb": "0x0000ad95",
+        "resume_thumb": "0x000007c9"
+      },
+      "config_defaults": {
+        "screen_contrast": 60,
+        "reference_slots": 30,
+        "price_layout": "normal+happy, bank 0..1, tier 0..4"
+      }
+    },
+    "DP60": {
+      "latest": {
+        "version": "2.13",
+        "mha_name": "UsbUpdate_DP60_DUREX.2.13.mha",
+        "mha_sha256": "459af7c2912179b07265961000152759aafef81c70977def6b7eb9f048f58466",
+        "mha_size": 277060,
+        "firmware_name": "MH430_DP60.2.13.bin",
+        "firmware_size": 276948,
+        "firmware_sha256": "a8126ec6dfc643eeecbe7ac2b7d166bf244761c093c3f6b0eb3e41cc60a302e2"
+      },
+      "previous_validation": {
+        "version": "2.12",
+        "mha_sha256": "16a3fbec9c1fa85b737882ae82e3d759ccb2524d2ff458fc6584c8ce68165100",
+        "firmware_size": 276752
+      },
+      "serial_patch": {
+        "hook_binary_offset": "0x230c",
+        "hook_mha_offset": "0x2358",
+        "original_hook_bytes": "90b5d9b0",
+        "branch_bytes": "41f07ab9",
+        "shell_binary_offset": "0x43604",
+        "shell_mha_offset": "0x43650",
+        "serial_mha_offset_in_patched_image": "0x43684",
+        "config_ram": "0x10007140",
+        "serial_field_offset": 8,
+        "save_routine_thumb": "0x000103f1",
+        "resume_thumb": "0x00002311"
+      },
+      "config_defaults": {
+        "screen_contrast": 48,
+        "reference_slots": 52,
+        "price_layout": "normal _0_0"
+      }
+    },
+    "DD40": {
+      "latest": {
+        "version": "2.13",
+        "mha_name": "UsbUpdate_DD40_DUREX.2.13.mha",
+        "mha_sha256": "7d0577fd4abd8a50ca2d2801db18c33bfb39a2789d35fdf18bff63f9c58dc2a8",
+        "mha_size": 293848,
+        "firmware_name": "MH430_DD40.2.13.bin",
+        "firmware_size": 293736,
+        "firmware_sha256": "f6a4153d8f07e3056952e2d1ecc72a16863c5dd341b13e6d139eec0ad6e8590e"
+      },
+      "previous_validation": {
+        "version": "2.12",
+        "mha_sha256": "92870f3f36404f510c72bd7c8013b8b79bafdda90db8a7fb4d1bf7e52b9d4e57",
+        "firmware_size": 293540
+      },
+      "serial_patch": {
+        "hook_binary_offset": "0x2540",
+        "hook_mha_offset": "0x258c",
+        "original_hook_bytes": "90b5d9b0",
+        "branch_bytes": "45f02ab9",
+        "shell_binary_offset": "0x47798",
+        "shell_mha_offset": "0x477e4",
+        "serial_mha_offset_in_patched_image": "0x47818",
+        "config_ram": "0x10006fa4",
+        "serial_field_offset": 8,
+        "save_routine_thumb": "0x0001186d",
+        "resume_thumb": "0x00002545"
+      },
+      "config_defaults": {
+        "screen_contrast": 45,
+        "reference_slots": 42,
+        "price_layout": "normal _0_0"
+      }
+    }
+  }
+}
