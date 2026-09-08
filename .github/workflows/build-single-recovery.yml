@@ -1,0 +1,172 @@
+name: Build MH430 single-model recovery
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-single-recovery.yml'
+      - 'tools/MH430-RECOVERY-DISPATCHER-template.sh'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mh430-single-recovery-builder
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild validated universal source and extract firmware
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PIN='1831fb3b7dc91d49971e0217964443badcc705a8'
+          BASE="https://raw.githubusercontent.com/MicrohardAssistenza/dp18-recovery/${PIN}/release/v0.4.0-final"
+          TMP="$(mktemp -d)"
+          OUT="$GITHUB_WORKSPACE/recovery-single/v0.5.0"
+          mkdir -p "$TMP/parts" "$OUT/firmware"
+          FILES='p01 p02 p03 p04 p05 p06 p07 p08 p09 p10 p11 t00 t01 t02 t03 t04 t05 t06 t07 t08 t09 t10 t11 t12 t13 t14 t15 t16 t17'
+          for f in $FILES; do curl -fsSL --retry 5 "$BASE/$f" -o "$TMP/parts/$f"; done
+          : > "$TMP/universal.sh.xz.b64"
+          for f in $FILES; do cat "$TMP/parts/$f" >> "$TMP/universal.sh.xz.b64"; done
+          test "$(wc -c < "$TMP/universal.sh.xz.b64" | tr -d ' ')" = '288057'
+          echo 'f6cde271f12035abbbf4628f37e342ae7bf0d69a8a1e7d9cb61252aa33eb8adf  '"$TMP/universal.sh.xz.b64" | sha256sum -c -
+          base64 -d "$TMP/universal.sh.xz.b64" > "$TMP/universal.sh.xz"
+          test "$(wc -c < "$TMP/universal.sh.xz" | tr -d ' ')" = '213236'
+          echo '8e338f6e2eefc8bd878196017d1e8a135697f581d548ef0bc0739ffc3c7f4ef5  '"$TMP/universal.sh.xz" | sha256sum -c -
+          xz -dc "$TMP/universal.sh.xz" > "$TMP/universal.sh"
+          test "$(wc -c < "$TMP/universal.sh" | tr -d ' ')" = '300348'
+          echo '8798d1b313f5a7816c64dbf384040a6088bccb2f47df1d6c3d39b6267663ab71  '"$TMP/universal.sh" | sha256sum -c -
+          bash -n "$TMP/universal.sh"
+          bash "$TMP/universal.sh" --selftest | tee "$TMP/universal-selftest.log"
+          grep -q 'SELFTEST_OK' "$TMP/universal-selftest.log"
+
+          python3 - "$TMP/universal.sh" "$OUT" <<'PY'
+          from pathlib import Path
+          import base64, hashlib, io, lzma, re, sys, tarfile
+
+          src=Path(sys.argv[1]).read_text()
+          out=Path(sys.argv[2])
+          fwdir=out/'firmware'
+          m=re.search(r"base64 -d <<'MH430_EMBEDDED_PAYLOAD_XZ'.*?\n(.*?)\nMH430_EMBEDDED_PAYLOAD_XZ",src,re.S)
+          if not m:
+              raise SystemExit('embedded firmware bundle marker not found')
+          packed=base64.b64decode(re.sub(r'\s+','',m.group(1)))
+          tarbytes=lzma.decompress(packed)
+          with tarfile.open(fileobj=io.BytesIO(tarbytes),mode='r:*') as tf:
+              tf.extractall(fwdir)
+
+          expected={
+            'UsbUpdate_DP30_DUREX.3.12.mha':(236776,'ab4643f0641a825285bf2595ea813018468f3e93b31395818ce9e30544e8687f'),
+            'UsbUpdate_DP60_DUREX.2.13.mha':(277060,'459af7c2912179b07265961000152759aafef81c70977def6b7eb9f048f58466'),
+            'UsbUpdate_DD40_DUREX.2.13.mha':(293848,'7d0577fd4abd8a50ca2d2801db18c33bfb39a2789d35fdf18bff63f9c58dc2a8'),
+          }
+          for name,(size,sha) in expected.items():
+              p=fwdir/name
+              if not p.is_file() or p.stat().st_size!=size or hashlib.sha256(p.read_bytes()).hexdigest()!=sha:
+                  raise SystemExit('firmware validation failed: '+name)
+
+          t=src.replace('SCRIPT_VERSION="0.4.0-universal-embedded"','SCRIPT_VERSION="0.5.0-lean"\nFIRMWARE_BASE="https://raw.githubusercontent.com/MicrohardAssistenza/dp18-recovery/main/recovery-single/v0.5.0/firmware"',1)
+          t=t.replace('# Automatic dispatcher/recovery for DP18, DP30, DP60 and DD40 legacy.','# Lean legacy engine: downloads ONLY the selected model firmware; DP18 routes to proven v1.13.',1)
+          a=t.index('extract_embedded_bundle() {')
+          b=t.index('\nextract_official_payload() {',a)
+          t=t[:a]+'extract_embedded_bundle() {\n  # v0.5.0 lean: no universal embedded bundle.\n  return 0\n}\n'+t[b:]
+          a=t.index('extract_official_payload() {')
+          b=t.index('\nhex_to_bytes()',a)
+          fn=r'''extract_official_payload() {
+            local model="$1" out src filename url
+            model_constants "$model"
+            out="$(official_path "$model")"
+            mkdir -p "$PAYLOADS"
+            if [ -f "$out" ] && [ "$(sha256sum "$out" | awk '{print $1}')" = "$OFFICIAL_SHA" ]; then return 0; fi
+            src="${MH430_PAYLOAD_SOURCE_DIR:-}"
+            filename="UsbUpdate_${model}_DUREX.$FW_VERSION.mha"
+            if [ -n "$src" ] && [ -f "$src/$filename" ]; then
+              say "Copio firmware ufficiale $model $FW_VERSION dalla sorgente locale di self-test"
+              cp -f "$src/$filename" "$out.new"
+            else
+              url="$FIRMWARE_BASE/$filename"
+              say "Scarico SOLO firmware ufficiale $model $FW_VERSION da GitHub"
+              curl -k -fL --retry 5 --retry-delay 2 --connect-timeout 15 --max-time 180 "$url" -o "$out.new" \
+                || fatal "download firmware $model $FW_VERSION fallito"
+            fi
+            [ "$(sha256sum "$out.new" | awk '{print $1}')" = "$OFFICIAL_SHA" ] || fatal "hash firmware $model $FW_VERSION non valido"
+            [ "$(wc -c < "$out.new" | tr -d ' ')" = "$OFFICIAL_SIZE" ] || fatal "dimensione firmware $model $FW_VERSION inattesa"
+            mv -f "$out.new" "$out"
+            chmod 600 "$out"
+          }
+          '''
+          t=t[:a]+fn+t[b:]
+          lean=out/'MH430-LEGACY-RECOVERY.sh'
+          lean.write_text(t)
+          PY
+
+          chmod +x "$OUT/MH430-LEGACY-RECOVERY.sh"
+          bash -n "$OUT/MH430-LEGACY-RECOVERY.sh"
+          ! grep -q 'MH430_EMBEDDED_PAYLOAD_XZ' "$OUT/MH430-LEGACY-RECOVERY.sh"
+          MH430_PAYLOAD_SOURCE_DIR="$OUT/firmware" "$OUT/MH430-LEGACY-RECOVERY.sh" --selftest | tee "$TMP/lean-selftest.log"
+          grep -q 'SELFTEST DP30 OK' "$TMP/lean-selftest.log"
+          grep -q 'SELFTEST DP60 OK' "$TMP/lean-selftest.log"
+          grep -q 'SELFTEST DD40 OK' "$TMP/lean-selftest.log"
+          grep -q 'SELFTEST_OK' "$TMP/lean-selftest.log"
+
+          LEAN_SHA="$(sha256sum "$OUT/MH430-LEGACY-RECOVERY.sh" | awk '{print $1}')"
+          sed "s/__LEGACY_SHA__/$LEAN_SHA/" "$GITHUB_WORKSPACE/tools/MH430-RECOVERY-DISPATCHER-template.sh" > "$OUT/MH430-RECOVERY-DISPATCHER.sh"
+          chmod +x "$OUT/MH430-RECOVERY-DISPATCHER.sh"
+          bash -n "$OUT/MH430-RECOVERY-DISPATCHER.sh"
+          ! grep -q '__LEGACY_SHA__' "$OUT/MH430-RECOVERY-DISPATCHER.sh"
+
+          (
+            cd "$OUT"
+            sha256sum MH430-LEGACY-RECOVERY.sh MH430-RECOVERY-DISPATCHER.sh firmware/UsbUpdate_DP30_DUREX.3.12.mha firmware/UsbUpdate_DP60_DUREX.2.13.mha firmware/UsbUpdate_DD40_DUREX.2.13.mha > manifest.sha256
+          )
+          cat "$OUT/manifest.sha256"
+
+      - name: Publish clean single-model recovery files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          OUT="$GITHUB_WORKSPACE/recovery-single/v0.5.0"
+          upsert() {
+            local repo_path="$1" local_file="$2" message="$3" meta http sha body try
+            meta="$(mktemp)"; body="$(mktemp)"
+            trap 'rm -f "$meta" "$body"' RETURN
+            for try in 1 2 3 4 5 6 7 8; do
+              http="$(curl -sS -o "$meta" -w '%{http_code}' \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${repo_path}?ref=main")"
+              sha=''
+              if [ "$http" = 200 ]; then sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha"])' "$meta")"; elif [ "$http" != 404 ]; then cat "$meta"; return 1; fi
+              python3 - "$local_file" "$message" "$sha" > "$body" <<'PY'
+          import base64,json,sys
+          path,msg,sha=sys.argv[1:]
+          d={'message':msg,'content':base64.b64encode(open(path,'rb').read()).decode(),'branch':'main'}
+          if sha: d['sha']=sha
+          print(json.dumps(d))
+          PY
+              http="$(curl -sS -o "$meta" -w '%{http_code}' -X PUT \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                -H 'Content-Type: application/json' --data-binary "@$body" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${repo_path}")"
+              case "$http" in 200|201) echo "Published $repo_path"; return 0;; 409|422) sleep "$try";; *) cat "$meta"; return 1;; esac
+            done
+            return 1
+          }
+          upsert 'recovery-single/v0.5.0/firmware/UsbUpdate_DP30_DUREX.3.12.mha' "$OUT/firmware/UsbUpdate_DP30_DUREX.3.12.mha" 'Publish DP30 3.12 firmware for lean recovery'
+          upsert 'recovery-single/v0.5.0/firmware/UsbUpdate_DP60_DUREX.2.13.mha' "$OUT/firmware/UsbUpdate_DP60_DUREX.2.13.mha" 'Publish DP60 2.13 firmware for lean recovery'
+          upsert 'recovery-single/v0.5.0/firmware/UsbUpdate_DD40_DUREX.2.13.mha' "$OUT/firmware/UsbUpdate_DD40_DUREX.2.13.mha" 'Publish DD40 2.13 firmware for lean recovery'
+          upsert 'recovery-single/v0.5.0/MH430-LEGACY-RECOVERY.sh' "$OUT/MH430-LEGACY-RECOVERY.sh" 'Publish MH430 lean legacy recovery v0.5.0'
+          upsert 'recovery-single/v0.5.0/MH430-RECOVERY-DISPATCHER.sh' "$OUT/MH430-RECOVERY-DISPATCHER.sh" 'Publish MH430 recovery dispatcher v0.5.0'
+          upsert 'recovery-single/v0.5.0/manifest.sha256' "$OUT/manifest.sha256" 'Publish MH430 single recovery manifest v0.5.0'
