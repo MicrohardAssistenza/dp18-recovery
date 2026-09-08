@@ -1,0 +1,150 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+VERSION="0.5.2"
+SELF="/usr/local/sbin/MH430-RECOVERY-DISPATCHER.sh"
+SERVICE="mh430-recovery-dispatch.service"
+SERVICE_FILE="/etc/systemd/system/$SERVICE"
+STATE="/var/lib/mh430-recovery-dispatch"
+LOG="$STATE/dispatch.log"
+IDENTITY="$STATE/identity"
+CLASSFILE="$STATE/classification"
+HIST_FW="$STATE/historical_mh430"
+SOURCEFILE="$STATE/source"
+TOKENFILE="$STATE/github_token"
+SFTPFILE="$STATE/sftp_password"
+
+DP18_WRAPPER_REF="e7d539c218b6c4629a78bbbc95a4a6b6d5d99609"
+DP18_WRAPPER_SHA="6e19648ea41f8fe46c43ebafb8b37c01d947bbd2631bc7e1b81437951ba18799"
+DP18_WRAPPER_URL="https://raw.githubusercontent.com/MicrohardAssistenza/dp18-recovery/$DP18_WRAPPER_REF/recovery-single/v0.5.2/DP18-RECOVERY-V1141-WRAPPER.sh"
+
+LEGACY_REF="740f88881081ebb60b2668becb0f65236768e145"
+LEGACY_URL="https://raw.githubusercontent.com/MicrohardAssistenza/dp18-recovery/$LEGACY_REF/recovery-single/v0.5.0/MH430-LEGACY-RECOVERY.sh"
+LEGACY_SHA="913c39540e33815ac64c64146e55dd90538ef7e9d23503404595e74d75225419"
+
+say(){ printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
+cleanup_dispatch_service(){
+  systemctl disable "$SERVICE" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/multi-user.target.wants/$SERVICE"
+}
+
+analyze_identity(){
+  mkdir -p "$STATE"
+  php -d open_basedir= -d date.timezone=UTC -r '
+$dirs=array("/root/sent","/root/send","/root/delayedsend"); $rows=array();
+foreach($dirs as $dir){if(!is_dir($dir))continue;foreach(glob($dir."/*.xml")?:array() as $f){$s=@file_get_contents($f);if($s===false)continue;if(!preg_match("/<(DP18|DP30|DP60|DD40)\\s+SerialNumber=[\"\\x27]([0-9]{5})[\"\\x27][^>]*TimeStamp=[\"\\x27]([^\"\\x27]+)[\"\\x27]/",$s,$m))continue;if($m[2]==="00000")continue;$fw="unknown";if(preg_match("/MH430:\\s*Ver\\.([0-9]+\\.[0-9]+)/",$s,$v))$fw=$v[1];$rows[]=array("model"=>$m[1],"serial"=>$m[2],"ts"=>$m[3],"fw"=>$fw,"file"=>$f);}}
+if(!$rows){fwrite(STDERR,"Nessun Pardata storico non-zero trovato\n");exit(20);} usort($rows,function($a,$b){return strcmp($b["ts"],$a["ts"]);});
+$pairs=array();foreach($rows as $r)$pairs[$r["model"]."-".$r["serial"]]=1;if(count($pairs)!==1){fwrite(STDERR,"Identita storiche multiple: ".implode(",",array_keys($pairs))."\n");exit(21);} $b=$rows[0];
+$class=$b["model"]==="DP18"?"DP18":(preg_match("/^4\\./",$b["fw"])?"DDX":"LEGACY");
+file_put_contents($argv[1],$b["model"]."-".$b["serial"]."\n");file_put_contents($argv[2],$class."\n");file_put_contents($argv[3],$b["fw"]."\n");file_put_contents($argv[4],$b["file"]."\n");
+' "$IDENTITY" "$CLASSFILE" "$HIST_FW" "$SOURCEFILE"
+}
+
+install_mode(){
+  [ "$(id -u)" -eq 0 ] || { echo 'ERRORE: root richiesto'; exit 1; }
+  mkdir -p "$STATE"; chmod 700 "$STATE"
+
+  systemctl disable --now mh430-github-loader.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/multi-user.target.wants/mh430-github-loader.service /etc/systemd/system/mh430-github-loader.service
+  systemctl disable --now mh430-universal-recovery.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/multi-user.target.wants/mh430-universal-recovery.service /etc/systemd/system/mh430-universal-recovery.service
+  systemctl daemon-reload >/dev/null 2>&1 || true
+
+  cp -f "$0" "$SELF"; chmod 700 "$SELF"
+  umask 077
+  sftp_value="${MH430_SFTP_PASSWORD:-${DP18_SFTP_PASSWORD:-}}"
+  [ -n "$sftp_value" ] || { echo 'ERRORE: MH430_SFTP_PASSWORD non fornita'; exit 2; }
+  printf '%s' "$sftp_value" > "$SFTPFILE"
+  if [ -n "${MH430_GITHUB_TOKEN:-${DP18_GITHUB_TOKEN:-}}" ]; then
+    printf '%s' "${MH430_GITHUB_TOKEN:-${DP18_GITHUB_TOKEN:-}}" > "$TOKENFILE"
+  fi
+
+  cat > "$SERVICE_FILE" <<UNIT
+[Unit]
+Description=MH430 Recovery Dispatcher v$VERSION
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash $SELF --resume
+Restart=on-failure
+RestartSec=20
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  systemctl daemon-reload
+  systemctl enable "$SERVICE" >/dev/null
+  systemctl restart "$SERVICE"
+
+  echo "DISPATCHER_PERSISTENTE_OK"
+  echo "DISPATCHER_VERSION=$VERSION"
+  echo "MAC=$(cat /sys/class/net/eth0/address 2>/dev/null || true)"
+  echo "HISTORICAL_IDENTITY=IN_ANALISI"
+  echo "Da questo punto il routing continua localmente anche se SSH/VPN cade."
+}
+
+resume_mode(){
+  mkdir -p "$STATE"; chmod 700 "$STATE"
+  exec >>"$LOG" 2>&1
+  say "MH430 recovery dispatcher v$VERSION"
+  say "MAC=$(cat /sys/class/net/eth0/address 2>/dev/null || true)"
+  rm -f "$IDENTITY" "$CLASSFILE" "$HIST_FW" "$SOURCEFILE"
+  analyze_identity
+  id="$(tr -d '\r\n' < "$IDENTITY")"
+  class="$(tr -d '\r\n' < "$CLASSFILE")"
+  fw="$(tr -d '\r\n' < "$HIST_FW")"
+  say "HISTORICAL_IDENTITY=$id"
+  say "CLASSIFICATION=$class HISTORICAL_MH430=$fw"
+  sftp="$(cat "$SFTPFILE")"
+  token="$(cat "$TOKENFILE" 2>/dev/null || true)"
+
+  case "$class" in
+    DDX)
+      say "SKIPPED_DDX: MH430 storico 4.x; nessuna modifica"
+      cleanup_dispatch_service
+      exit 0
+      ;;
+    DP18)
+      tmp="/root/DP18-RECOVERY-V1141-WRAPPER.sh.new"
+      say "ROUTE $id -> DP18 FULL RECOVERY v1.14.1 (v1.13 validata + registry opzionale + retry reset sicuro)"
+      curl -k -fL --retry 5 --retry-delay 2 --connect-timeout 15 --max-time 60 "$DP18_WRAPPER_URL" -o "$tmp"
+      [ "$(sha256sum "$tmp" | awk '{print $1}')" = "$DP18_WRAPPER_SHA" ] || { say 'ERRORE SHA DP18 wrapper v1.14.1'; exit 31; }
+      bash -n "$tmp"
+      mv -f "$tmp" /root/DP18-RECOVERY-V1141-WRAPPER.sh; chmod 700 /root/DP18-RECOVERY-V1141-WRAPPER.sh
+      cleanup_dispatch_service
+      say "HANDOFF DP18 wrapper v1.14.1"
+      exec env DP18_SFTP_PASSWORD="$sftp" DP18_GITHUB_TOKEN="$token" /root/DP18-RECOVERY-V1141-WRAPPER.sh
+      ;;
+    LEGACY)
+      tmp="/root/MH430-LEGACY-RECOVERY.sh.new"
+      say "ROUTE $id -> LEGACY LEAN v0.5.0"
+      curl -k -fL --retry 5 --retry-delay 2 --connect-timeout 15 --max-time 120 "$LEGACY_URL" -o "$tmp"
+      [ "$(sha256sum "$tmp" | awk '{print $1}')" = "$LEGACY_SHA" ] || { say 'ERRORE SHA LEGACY LEAN'; exit 32; }
+      bash -n "$tmp"
+      mv -f "$tmp" /root/MH430-LEGACY-RECOVERY.sh; chmod 700 /root/MH430-LEGACY-RECOVERY.sh
+      cleanup_dispatch_service
+      say "HANDOFF LEGACY LEAN v0.5.0"
+      exec env MH430_SFTP_PASSWORD="$sftp" MH430_GITHUB_TOKEN="$token" /root/MH430-LEGACY-RECOVERY.sh --bootstrap
+      ;;
+    *) say "ERRORE classificazione $class"; exit 33 ;;
+  esac
+}
+
+status_mode(){
+  echo "DISPATCHER_VERSION=$VERSION"
+  echo "MAC=$(cat /sys/class/net/eth0/address 2>/dev/null || true)"
+  echo "HISTORICAL_IDENTITY=$(cat "$IDENTITY" 2>/dev/null || echo IN_RICERCA)"
+  echo "CLASSIFICATION=$(cat "$CLASSFILE" 2>/dev/null || echo IN_RICERCA)"
+  echo "HISTORICAL_MH430=$(cat "$HIST_FW" 2>/dev/null || echo IN_RICERCA)"
+  echo '=== LOG ==='; tail -n 50 "$LOG" 2>/dev/null || true
+}
+
+case "${1:---install}" in
+  --install|--bootstrap) install_mode ;;
+  --resume) resume_mode ;;
+  --status) status_mode ;;
+  *) echo "uso: $0 [--bootstrap|--resume|--status]"; exit 2 ;;
+esac
