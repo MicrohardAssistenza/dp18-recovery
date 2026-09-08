@@ -1,5 +1,6 @@
 name: Build MH430 single-model recovery
 
+# v0.5.0 trigger: clean single-model build
 on:
   workflow_dispatch:
   push:
