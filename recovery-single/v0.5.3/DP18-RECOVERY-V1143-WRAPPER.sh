@@ -135,6 +135,9 @@ if [ "$name" = "DD40" ] && [ "${serial:-0}" = "0" ]; then
         "$STATE/serial_empty.sent" \
         "$STATE/serial_persistence.ok" \
         "$STATE/serial_attempts" \
+        "$STATE/final_312.sent" \
+        "$STATE/config.done" \
+        "$STATE/DONE" \
         "$STATE/FAILED"
 fi
 
